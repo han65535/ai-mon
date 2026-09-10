@@ -1,0 +1,9 @@
+.tools/
+out/
+*.pdb
+*.ilk
+.vscode/
+.env
+.env.*
+*.pem
+*.key
