@@ -8,13 +8,13 @@ A small, native Windows tray app showing **remaining subscription allowance and 
 
 ## Screenshots
 
-**Main window**
-
-![Main window showing Claude and Codex allowance, history, and reset times](docs/images/screenshot.png)
-
 **Mini window**
 
 ![Mini window with sample data](docs/images/mini-window-en.png)
+
+**Main window**
+
+<a href="docs/images/screenshot.png"><img src="docs/images/screenshot.png" width="300" alt="Main window showing Claude and Codex allowance, history, and reset times"></a>
 
 ## Run
 

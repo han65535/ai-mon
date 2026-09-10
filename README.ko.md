@@ -9,13 +9,13 @@ C++17과 Win32로 만들며, 압축 전 실행 파일 1,000,000바이트 이하�
 
 ## 스크린샷
 
-**상세 창 (영문 UI)**
-
-![Claude와 Codex의 잔여 한도·추이·초기화 시간을 표시한 상세 창](docs/images/screenshot.png)
-
 **미니 창**
 
 ![예시 데이터로 표시한 미니 창](docs/images/mini-window-ko.png)
+
+**상세 창 (영문 UI)**
+
+<a href="docs/images/screenshot.png"><img src="docs/images/screenshot.png" width="300" alt="Claude와 Codex의 잔여 한도·추이·초기화 시간을 표시한 상세 창"></a>
 
 ## 실행
 
