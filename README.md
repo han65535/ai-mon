@@ -6,9 +6,17 @@ A small, native Windows tray app showing **remaining subscription allowance and 
 
 **Download:** [English installer](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-en.msi) · [한국어 설치](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-ko.msi) · [Portable EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [All releases](https://github.com/han65535/ai-mon/releases)
 
-## Run
+## Screenshots
+
+**Main window**
+
+![Main window showing Claude and Codex allowance, history, and reset times](docs/images/screenshot.png)
+
+**Mini window**
 
 ![Mini window with sample data](docs/images/mini-window-en.png)
+
+## Run
 
 **Installer:** open `out/Installer/AI-Mon-0.3.4-x64-en.msi` (English wizard) or `AI-Mon-0.3.4-x64-ko.msi` (Korean wizard). Choose one; both install the same bilingual app for your user account under `%LOCALAPPDATA%\Programs\AI Mon`, with a Start menu shortcut. Reopen the original MSI to repair/remove, or uninstall through Windows Settings. Settings and usage cache are preserved.
 

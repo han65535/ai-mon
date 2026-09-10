@@ -7,9 +7,17 @@ C++17과 Win32로 만들며, 압축 전 실행 파일 1,000,000바이트 이하�
 
 **다운로드:** [한국어 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-ko.msi) · [영문 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-en.msi) · [포터블 EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [전체 릴리스](https://github.com/han65535/ai-mon/releases)
 
-## 실행
+## 스크린샷
+
+**상세 창 (영문 UI)**
+
+![Claude와 Codex의 잔여 한도·추이·초기화 시간을 표시한 상세 창](docs/images/screenshot.png)
+
+**미니 창**
 
 ![예시 데이터로 표시한 미니 창](docs/images/mini-window-ko.png)
+
+## 실행
 
 **설치형:** `out/Installer/AI-Mon-0.3.4-x64-ko.msi`를 더블클릭합니다. 현재 사용자 계정의
 `%LOCALAPPDATA%\Programs\AI Mon`에 설치하고 시작 메뉴에 바로가기를 만듭니다.
