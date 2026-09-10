@@ -1,5 +1,7 @@
 #include "collector.hpp"
 #include "localization.hpp"
+#include "claude_bridge.hpp"
+#include "startup.hpp"
 #include <cstdio>
 #include <stdexcept>
 #include <limits>
@@ -328,8 +330,248 @@ void language_tests(const std::wstring &root) {
     check(atomic_write(settings_file, dump(doc.get())) && !load_settings(settings_file, loaded),
           "invalid stored language rejected");
 }
+std::string quota_line(uint64_t reset, int minutes = 300, const std::string &used = "12.5",
+                       const std::string &id = "codex") {
+    return "{\"type\":\"event_msg\",\"timestamp\":\"" + iso_now() +
+           "\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"" + id +
+           "\",\"primary\":{\"used_percent\":" + used + ",\"window_minutes\":" + std::to_string(minutes) +
+           ",\"resets_at\":" + std::to_string(reset) + "},\"secondary\":null}}}";
+}
+void quota_tests(const std::wstring &root) {
+    uint64_t now = now_seconds();
+    QuotaSnapshot q;
+    auto usage = parse(
+        R"({"rate_limits_available":true,"subscription_type":"max","rate_limits":{"five_hour":{"utilization":26,"resets_at":"2026-09-10T10:50:00.472851+00:00"},"seven_day":{"utilization":20,"resets_at":"2026-09-16T04:00:00Z"}}})");
+    check(parse_claude_usage(usage.get(), now, q) && q.short_term.remaining == 7400 &&
+              q.weekly.remaining == 8000 && q.short_term.minutes == 300 && q.weekly.minutes == 10080 &&
+              q.short_term.resets == timestamp("2026-09-10T10:50:00Z") && q.plan == "max",
+          "Claude SDK usage converts real utilization and ISO reset times");
+    usage = parse(R"({"rate_limits_available":false,"rate_limits":null})");
+    check(parse_claude_usage(usage.get(), now, q) && !q.short_term.available && !q.weekly.available,
+          "non-subscription account clears old allowance");
+    usage = parse(
+        R"({"rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":100,"resets_at":null}}})");
+    check(parse_claude_usage(usage.get(), now, q) && !q.short_term.available && q.weekly.available &&
+              q.weekly.remaining == 0 && q.weekly.resets == 0,
+          "SDK partial windows preserve zero remaining and unknown reset");
+    for (
+        const char *invalid :
+        {R"({})", R"({"rate_limits_available":true})",
+         R"({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":101}}})",
+         R"({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":20,"resets_at":"invalid"}}})",
+         R"({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":"20"}}})"}) {
+        usage = parse(invalid);
+        check(!parse_claude_usage(usage.get(), now, q), "malformed SDK response cannot overwrite quota");
+    }
+    check(parse_codex_quota(quota_line(now + 1000), q) && q.short_term.remaining == 8750 &&
+              q.short_term.minutes == 300,
+          "Codex null token info still supplies real remaining allowance");
+    check(!q.weekly.available, "absent weekly quota is not invented");
+    check(parse_codex_quota(quota_line(now + 5000, 10080, "4"), q) && q.weekly.remaining == 9600 &&
+              !q.short_term.available,
+          "weekly primary is classified by duration, not position");
+    check(parse_codex_quota(quota_line(now + 1000, 240), q) && q.short_term.minutes == 240,
+          "server-reported four-hour window preserved");
+    check(!parse_codex_quota(quota_line(now + 1000, 300, "101"), q) &&
+              !parse_codex_quota(quota_line(now + 1000, 300, "-1"), q),
+          "invalid percentages rejected");
+    check(!parse_codex_quota(quota_line(now + 1000, 300, "3", "other_model"), q),
+          "model-specific bucket cannot overwrite account quota");
+    check(parse_codex_quota(quota_line(now - 1, 300, "100"), q) && !quota_current(q.short_term, now),
+          "expired limit waits for new report, never invents reset");
+    check(parse_codex_quota(quota_line(now + 1000, 300, "0"), q) && quota_current(q.short_term, now) &&
+              q.short_term.remaining == 10000,
+          "zero used means fully remaining");
+    auto encoded = json(quota_json(q));
+    QuotaSnapshot restored;
+    check(quota_json(encoded.get(), restored) && restored.short_term.remaining == 10000 &&
+              restored.short_term.resets == now + 1000,
+          "quota cache roundtrip");
+    auto claude = std::string("{\"rate_limits\":{\"five_hour\":{\"used_percentage\":75.5,\"resets_at\":") +
+                  std::to_string(now + 1000) +
+                  "},\"seven_day\":{\"used_percentage\":20,\"resets_at\":" + std::to_string(now + 50000) +
+                  "}},\"context_window\":{\"remaining_percentage\":99}}";
+    check(parse_claude_quota(claude, now, q) && q.short_term.remaining == 2450 && q.weekly.remaining == 8000,
+          "Claude subscription percentages, not context occupancy");
+    check(parse_claude_quota("{\"context_window\":{\"remaining_percentage\":99}}", now, q) &&
+              !q.short_term.available && !q.weekly.available,
+          "missing Claude subscription telemetry is unknown");
+    QuotaStore history;
+    check(parse_codex_quota(quota_line(now + 2000), q) && history.insert(q, now), "insert quota sample");
+    auto older = q;
+    older.observed -= 60;
+    older.short_term.remaining = 9900;
+    history.insert(older, now);
+    check(history.latest.short_term.remaining == 8750 && history.latest.observed == now,
+          "old session cannot override newer account snapshot");
+    auto future = q;
+    future.observed = now + 301;
+    check(!history.insert(future, now), "future quota timestamps rejected");
+    auto only_week = q;
+    only_week.observed = now + 1;
+    only_week.weekly = q.short_term;
+    only_week.weekly.minutes = 10080;
+    only_week.short_term = {};
+    history.insert(only_week, now);
+    check(!history.latest.short_term.available, "new snapshot clears missing old windows");
+    for (size_t i = 0; i < MaxQuotaHistory + 50; ++i) {
+        q.observed = now - 600 + static_cast<uint64_t>(i);
+        q.short_term.remaining = static_cast<int>(i);
+        history.insert(q, now);
+    }
+    check(history.history.size() <= MaxQuotaHistory, "quota history bounded");
+    auto data = join(root, L"quota-data"), logs = join(root, L"quota-logs");
+    check(ensure_directory(data) && ensure_directory(logs), "quota collector fixture directories");
+    auto file = join(logs, L"quota.jsonl");
+    check(atomic_write(file, quota_line(now + 1000, 10080, "4") + "\n"), "quota-only source event fixture");
+    Settings settings = default_settings();
+    settings.enabled[0] = false;
+    settings.roots[1] = logs;
+    Collector collector(data);
+    collector.configure(settings);
+    auto snap = collector.scan();
+    check(snap.providers[1].total.events == 0 && snap.providers[1].quota.latest.weekly.remaining == 9600,
+          "collector keeps account quota separate from token totals");
+    Collector restart(data);
+    restart.configure(settings);
+    check(restart.load(), "load persisted quota history");
+    snap = restart.scan();
+    check(snap.providers[1].quota.latest.weekly.remaining == 9600 && restart.bytes_read() == 0,
+          "restart restores quota without rereading logs");
+    std::string state_text;
+    check(read_text(join(data, L"state.json"), state_text, 1024 * 1024), "read migration fixture");
+    auto state = parse(state_text);
+    cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(state.get(), "version"), 1);
+    cJSON_DeleteItemFromObjectCaseSensitive(state.get(), "quotas");
+    check(atomic_write(join(data, L"state.json"), dump(state.get())), "write legacy cache fixture");
+    Collector migrated(data);
+    migrated.configure(settings);
+    check(migrated.load(), "version one cache accepted for migration");
+    snap = migrated.scan();
+    check(snap.providers[1].quota.latest.weekly.remaining == 9600 && migrated.bytes_read() > 0,
+          "legacy checkpoints replayed for quota discovery");
+    auto bridge_dir = join(root, L"bridge-data"), claude_settings = join(root, L"claude-test-settings.json");
+    check(ensure_directory(bridge_dir), "bridge fixture folder");
+    check(
+        atomic_write(
+            claude_settings,
+            R"({"model":"keep-model","statusLine":{"type":"command","command":"cat","padding":3},"hooks":{"keep":true}})"),
+        "existing statusline fixture");
+    check(connect_claude(claude_settings, bridge_dir, L"C:/Program Files/AI Mon/ai-mon.exe") ==
+              BridgeResult::Done,
+          "connect while preserving existing status line");
+    std::string settings_text;
+    check(read_text(claude_settings, settings_text, 65536), "read connected settings");
+    auto configured = parse(settings_text);
+    check(str(configured.get(), "model") == "keep-model" &&
+              cJSON_IsObject(field(configured.get(), "hooks")) &&
+              str(field(configured.get(), "statusLine"), "command").find("--claude-statusline") !=
+                  std::string::npos,
+          "unrelated Claude settings preserved");
+    check(connect_claude(claude_settings, bridge_dir, L"C:/Program Files/AI Mon/ai-mon.exe") ==
+              BridgeResult::AlreadyConnected,
+          "bridge connect is idempotent");
+    check(disconnect_claude(claude_settings, bridge_dir) == BridgeResult::Done,
+          "disconnect restores original status line");
+    check(read_text(claude_settings, settings_text, 65536), "read restored settings");
+    configured = parse(settings_text);
+    check(str(field(configured.get(), "statusLine"), "command") == "cat" &&
+              cJSON_GetNumberValue(field(field(configured.get(), "statusLine"), "padding")) == 3,
+          "original command and padding restored");
+    check(connect_claude(claude_settings, bridge_dir, L"C:/app.exe") == BridgeResult::Done,
+          "reconnect fixture");
+    check(atomic_write(claude_settings, R"({"statusLine":{"type":"command","command":"user-new-command"}})"),
+          "simulate external settings edit");
+    check(disconnect_claude(claude_settings, bridge_dir) == BridgeResult::Changed,
+          "disconnect does not overwrite external edits");
+}
 } // namespace
+int fake_claude() {
+    char line[2048];
+    if (!std::fgets(line, sizeof(line), stdin) || !strstr(line, "initialize"))
+        return 2;
+    std::puts(
+        R"({"type":"control_response","response":{"subtype":"success","request_id":"init","response":{}}})");
+    std::fflush(stdout);
+    if (!std::fgets(line, sizeof(line), stdin) || !strstr(line, "get_usage") ||
+        !strstr(line, "skip_behaviors"))
+        return 3;
+    auto mode = env(L"AI_MON_TEST_PROBE");
+    if (mode == L"hang") {
+        Sleep(30000);
+        return 4;
+    }
+    if (mode == L"invalid")
+        std::puts(
+            R"({"type":"control_response","response":{"subtype":"success","request_id":"quota","response":{}}})");
+    else
+        std::puts(
+            R"({"type":"control_response","response":{"subtype":"success","request_id":"quota","response":{"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":26,"resets_at":null},"seven_day":{"utilization":20,"resets_at":null}}}}})");
+    std::fflush(stdout);
+    Sleep(30000); // The monitor must close its own child after receiving the response.
+    return 0;
+}
+DWORD WINAPI cancel_probe(void *event) {
+    Sleep(500);
+    SetEvent(event);
+    return 0;
+}
+void probe_tests(const std::wstring &root) {
+    auto profile = env(L"USERPROFILE");
+    auto home = join(root, L"probe-home"), data = join(root, L"probe-output");
+    check(ensure_directory(home) && ensure_directory(join(home, L".local")) &&
+              ensure_directory(join(home, L".local\\bin")),
+          "probe executable fixture directory");
+    wchar_t self[32768]{};
+    GetModuleFileNameW(nullptr, self, 32768);
+    check(CopyFileW(self, join(home, L".local\\bin\\claude.exe").c_str(), TRUE), "copy fake CLI");
+    SetEnvironmentVariableW(L"USERPROFILE", home.c_str());
+    SetEnvironmentVariableW(L"AI_MON_TEST_PROBE", L"success");
+    check(probe_claude(data) == ClaudeProbe::Ready,
+          "real process handshake retrieves quota without user prompt");
+    std::string before, after;
+    check(read_text(join(data, L"claude-quota.json"), before, 8192), "probe saves sanitized quota");
+    auto doc = parse(before);
+    QuotaSnapshot q;
+    check(quota_json(doc.get(), q) && q.short_term.remaining == 7400 && q.weekly.remaining == 8000,
+          "process response correctly normalized");
+    SetEnvironmentVariableW(L"AI_MON_TEST_PROBE", L"invalid");
+    check(probe_claude(data) == ClaudeProbe::Failed, "invalid subprocess response is a failure");
+    check(read_text(join(data, L"claude-quota.json"), after, 8192) && before == after,
+          "failed probe preserves last known values");
+    SetEnvironmentVariableW(L"AI_MON_TEST_PROBE", L"hang");
+    Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    Handle cancel(CreateThread(nullptr, 0, cancel_probe, stop.value, 0, nullptr));
+    auto started = GetTickCount64();
+    check(probe_claude(data, stop.value) == ClaudeProbe::Failed && GetTickCount64() - started < 3000,
+          "shutdown cancels hung CLI promptly");
+    WaitForSingleObject(cancel.value, INFINITE);
+    SetEnvironmentVariableW(L"USERPROFILE", profile.c_str());
+    SetEnvironmentVariableW(L"AI_MON_TEST_PROBE", nullptr);
+}
 int wmain(int argc, wchar_t **argv) {
+    if (argc == 3 && wcscmp(argv[1], L"--startup-test") == 0) {
+        std::wstring key = argv[2];
+        if (key.find(L"Software\\AI Mon\\Tests\\") != 0)
+            return 2;
+        auto command =
+            startup_command(L"C:\\Program Files\\AI Mon\\ai-mon.exe", L"C:\\Users\\Test User\\AI Mon");
+        bool ok = startup_value(key.c_str()).empty() && set_startup_value(command, key.c_str()) &&
+                  startup_value(key.c_str()) == command &&
+                  !set_startup_value(std::wstring(261, L'x'), key.c_str()) &&
+                  startup_value(key.c_str()) == command && set_startup_value(L"", key.c_str()) &&
+                  startup_value(key.c_str()).empty();
+        ok = ok && set_startup_value(command, key.c_str()) &&
+             remove_startup_for(L"C:\\Other\\ai-mon.exe", key.c_str()) &&
+             startup_value(key.c_str()) == command &&
+             remove_startup_for(L"C:\\Program Files\\AI Mon\\ai-mon.exe", key.c_str()) &&
+             startup_value(key.c_str()).empty();
+        RegDeleteKeyW(HKEY_CURRENT_USER, key.c_str());
+        std::printf("Startup registry test: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (argc > 2 && wcscmp(argv[1], L"-p") == 0)
+        return fake_claude();
     if (argc != 2) {
         std::fprintf(stderr, "Pass a new writable fixture directory.\n");
         return 2;
@@ -338,6 +580,20 @@ int wmain(int argc, wchar_t **argv) {
         parser_tests();
         collector_tests(argv[1]);
         language_tests(argv[1]);
+        quota_tests(argv[1]);
+        probe_tests(argv[1]);
+        check(startup_command(L"C:\\Program Files\\AI Mon\\ai-mon.exe", L"C:\\Data\\") ==
+                  L"\"C:\\Program Files\\AI Mon\\ai-mon.exe\" --startup --data-dir \"C:\\Data\\\\\"",
+              "startup command safely quotes spaces and trailing slash");
+        Settings appearance = default_settings(), restored;
+        auto appearance_file = join(argv[1], L"appearance.json");
+        appearance.mini_opacity = 65;
+        check(save_settings(appearance_file, appearance) && load_settings(appearance_file, restored) &&
+                  restored.mini_opacity == 65,
+              "transparency setting survives restart");
+        appearance.mini_opacity = 0;
+        check(save_settings(appearance_file, appearance) && !load_settings(appearance_file, restored),
+              "invisible widget configuration rejected");
         std::printf("PASS: %d checks\n", checks);
         return 0;
     } catch (const std::exception &e) {

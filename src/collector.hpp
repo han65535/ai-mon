@@ -1,10 +1,12 @@
 #pragma once
 #include "usage.hpp"
+#include "quota.hpp"
 #include <functional>
 
 namespace aimon {
 enum class Status { Disabled, Collecting, Ready, Empty, Missing, ReadError, Unsupported, Partial };
 struct ProviderSnapshot {
+    QuotaStore quota;
     Totals total;
     Status status = Status::Collecting;
     uint64_t success = 0;
@@ -39,6 +41,7 @@ class Collector {
     Settings settings_;
     std::wstring data_dir_;
     EventStore store_;
+    std::array<QuotaStore, 2> quotas_;
     std::map<std::wstring, FileState> files_;
     std::array<uint64_t, 2> success_{{0, 0}};
     uint64_t bytes_read_ = 0;

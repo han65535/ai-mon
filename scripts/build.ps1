@@ -10,7 +10,7 @@ $common = @('--target=x86_64-w64-windows-gnu','-DUNICODE','-D_UNICODE','-DWINVER
 $opt = if ($Configuration -eq 'Debug') { @('-O0','-g') } else { @('-Oz','-flto','-ffunction-sections','-fdata-sections') }
 & (Join-Path $bin 'clang.exe') @common @opt '-std=c99' '-c' (Join-Path $projectRoot 'third_party\cjson\cJSON.c') '-o' (Join-Path $out 'cjson.o')
 if ($LASTEXITCODE -ne 0) { throw 'cJSON compilation failed' }
-$sources = @('platform.cpp','usage.cpp','collector.cpp','localization.cpp') | ForEach-Object { Join-Path $projectRoot "src\$_" }
+$sources = @('platform.cpp','usage.cpp','collector.cpp','localization.cpp','quota.cpp','claude_bridge.cpp','mini_window.cpp','startup.cpp') | ForEach-Object { Join-Path $projectRoot "src\$_" }
 $objects = @((Join-Path $out 'cjson.o'))
 Push-Location (Join-Path $projectRoot 'resources')
 try {
@@ -29,7 +29,7 @@ if ($Configuration -eq 'Test') {
 }
 $link = @('-static','-Wl,--gc-sections','-Wl,--dynamicbase','-Wl,--nxcompat','-Wl,--high-entropy-va','-Wl,--no-insert-timestamp')
 if ($Configuration -ne 'Debug') { $link += '-s' }
-& (Join-Path $bin 'clang++.exe') @common @opt '-std=c++17' @sources @objects @subsystem @link '-lshell32' '-luser32' '-lgdi32' '-lcomctl32' '-o' (Join-Path $out $name)
+& (Join-Path $bin 'clang++.exe') @common @opt '-std=c++17' @sources @objects @subsystem @link '-lshell32' '-luser32' '-lgdi32' '-lcomctl32' '-ladvapi32' '-o' (Join-Path $out $name)
 if ($LASTEXITCODE -ne 0) { throw 'C++ build failed' }
 Get-Item -LiteralPath (Join-Path $out $name) | Select-Object FullName,Length
 if ($Configuration -eq 'Release') { & (Join-Path $PSScriptRoot 'check-release.ps1') -Toolchain $toolchainRoot }

@@ -62,6 +62,6 @@ To change a built-in translation, edit its source JSON and rebuild. Adding anoth
 .\scripts\package.ps1 -Language ko
 ```
 
-These produce `AI-Mon-0.2.0-x64-en.msi` and `AI-Mon-0.2.0-x64-ko.msi`. Both install the same bilingual EXE. Choose one installer; they represent the same product/version and should not be installed side by side. The setup wizard's language does not override the app's saved selection or Windows-language default. Use the original MSI for repair.
+These produce `AI-Mon-0.3.4-x64-en.msi` and `AI-Mon-0.3.4-x64-ko.msi`. Both install the same bilingual EXE. Choose one installer; they represent the same product/version and should not be installed side by side. The setup wizard's language does not override the app's saved selection or Windows-language default. Use the original MSI for repair.
 
 Installer strings live separately in `installer/ui.en.json` and `installer/ui.ko.json`. Community app packs do not translate Windows Installer itself.

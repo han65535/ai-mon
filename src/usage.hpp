@@ -48,6 +48,7 @@ struct Settings {
     std::array<std::wstring, 2> roots;
     int interval = 10;
     bool show_start = true;
+    int mini_opacity = 100;
     std::string language = "auto";
 };
 Settings default_settings();

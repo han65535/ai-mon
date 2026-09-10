@@ -1,5 +1,8 @@
 #include "collector.hpp"
 #include "localization.hpp"
+#include "claude_bridge.hpp"
+#include "mini_window.hpp"
+#include "startup.hpp"
 #include <shellapi.h>
 #include <commctrl.h>
 #include <algorithm>
@@ -9,12 +12,14 @@
 using namespace aimon;
 namespace {
 constexpr wchar_t MainClass[] = L"AI.Mon.Window.1";
+constexpr wchar_t ChartClass[] = L"AI.Mon.QuotaChart.1";
 constexpr wchar_t SettingsClass[] = L"AI.Mon.Settings.1";
 std::wstring main_class_name = MainClass;
 constexpr UINT TrayMessage = WM_APP + 1, UpdatedMessage = WM_APP + 2;
-constexpr int Open = 100, Refresh = 101, Configure = 102, About = 103, Exit = 104;
+constexpr int Open = 100, Refresh = 101, Configure = 102, About = 103, Exit = 104, Mini = 105;
 HINSTANCE instance = nullptr;
 Localizer locale;
+MiniWindow mini;
 const wchar_t *tr(const char *key) {
     return locale.text(key);
 }
@@ -24,12 +29,18 @@ struct App {
     CRITICAL_SECTION lock{};
     Settings settings;
     Snapshot snapshot;
+    ClaudeProbe claude_probe = ClaudeProbe::Waiting;
+    bool probe_enabled = true;
+    bool startup_controls = true;
+    std::wstring executable;
     std::wstring data_dir;
-    bool worker_failed = false, settings_warning = false;
+    bool worker_failed = false, settings_warning = false, tray_active = false;
+    HWND chart[2][2]{};
+    HICON tray_icons[2]{};
     UINT dpi = 96, taskbar_created = 0;
     HFONT font = nullptr, title_font = nullptr, number_font = nullptr;
     std::vector<HWND> controls;
-    HWND status[2]{}, input[2]{}, output[2]{}, cache[2]{}, note = nullptr;
+    HWND status[2]{}, cache[2]{}, note = nullptr;
     App() { InitializeCriticalSection(&lock); }
     ~App() {
         if (font)
@@ -78,21 +89,230 @@ void show_window() {
     ShowWindow(app.window, SW_RESTORE);
     SetForegroundWindow(app.window);
 }
-void notify_icon(DWORD operation) {
-    NOTIFYICONDATAW n{};
-    n.cbSize = sizeof(n);
-    n.hWnd = app.window;
-    n.uID = 1;
-    n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    n.uCallbackMessage = TrayMessage;
-    n.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(101));
-    wcsncpy_s(n.szTip, tr("tray.tip"), _TRUNCATE);
-    if (!Shell_NotifyIconW(operation, &n) && operation == NIM_ADD)
-        ShowWindow(app.window, SW_SHOW);
-    if (operation == NIM_ADD) {
-        n.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIconW(NIM_SETVERSION, &n);
+HFONT make_font(int size, int weight, UINT dpi);
+std::wstring percent(const QuotaWindow &value) {
+    if (!quota_current(value, now_seconds()))
+        return L"—";
+    return std::to_wstring(value.remaining / 100) +
+           (value.remaining % 100 ? L"." + std::to_wstring((value.remaining % 100) / 10) : L"") + L"%";
+}
+COLORREF quota_color(int remaining) {
+    return remaining <= 1000 ? RGB(220, 55, 55) : remaining <= 2500 ? RGB(210, 130, 20) : RGB(30, 155, 95);
+}
+HICON quota_icon(int provider, const QuotaSnapshot &quota, bool enabled) {
+    const int size = GetSystemMetrics(SM_CXSMICON);
+    HDC screen = GetDC(nullptr), dc = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, size, size),
+            mask = CreateBitmap(size, size, 1, 1, nullptr);
+    HDC mask_dc = CreateCompatibleDC(screen);
+    auto old_mask = SelectObject(mask_dc, mask);
+    PatBlt(mask_dc, 0, 0, size, size, BLACKNESS);
+    SelectObject(mask_dc, old_mask);
+    DeleteDC(mask_dc);
+    auto old = SelectObject(dc, bitmap);
+    RECT r{0, 0, size, size};
+    HBRUSH background = CreateSolidBrush(provider == 0 ? RGB(73, 46, 34) : RGB(25, 55, 77));
+    FillRect(dc, &r, background);
+    DeleteObject(background);
+    int remaining = 10001;
+    for (const auto &value : {quota.short_term, quota.weekly})
+        if (enabled && quota_current(value, now_seconds()))
+            remaining = std::min(remaining, value.remaining);
+    std::wstring label = remaining <= 10000 ? std::to_wstring(remaining / 100) : L"—";
+    HFONT font = CreateFontW(-MulDiv(size, remaining == 10000 ? 50 : 75, 100), 0, 0, 0, FW_BOLD, FALSE, FALSE,
+                             FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    auto old_font = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    r.bottom = size - 3;
+    DrawTextW(dc, label.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, old_font);
+    DeleteObject(font);
+    int half = size / 2;
+    for (int slot = 0; slot < 2; ++slot) {
+        const auto &value = slot ? quota.weekly : quota.short_term;
+        bool available = enabled && quota_current(value, now_seconds());
+        RECT track{slot * half, size - 3, (slot + 1) * half - 1, size};
+        HBRUSH brush = CreateSolidBrush(RGB(105, 105, 105));
+        FillRect(dc, &track, brush);
+        DeleteObject(brush);
+        if (available) {
+            track.right = track.left + MulDiv(half - 1, value.remaining, 10000);
+            brush = CreateSolidBrush(quota_color(value.remaining));
+            FillRect(dc, &track, brush);
+            DeleteObject(brush);
+        }
     }
+    SelectObject(dc, old);
+    DeleteDC(dc);
+    ReleaseDC(nullptr, screen);
+    ICONINFO info{};
+    info.fIcon = TRUE;
+    info.hbmColor = bitmap;
+    info.hbmMask = mask;
+    HICON icon = CreateIconIndirect(&info);
+    DeleteObject(bitmap);
+    DeleteObject(mask);
+    return icon;
+}
+void notify_icon(DWORD operation) {
+    if (operation == NIM_ADD)
+        app.tray_active = true;
+    if (!app.tray_active && operation != NIM_DELETE)
+        return;
+    Snapshot snapshot;
+    {
+        Lock lock;
+        snapshot = app.snapshot;
+    }
+    for (int i = 0; i < 2; ++i) {
+        NOTIFYICONDATAW n{};
+        n.cbSize = sizeof(n);
+        n.hWnd = app.window;
+        n.uID = static_cast<UINT>(i + 1);
+        n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+        n.uCallbackMessage = TrayMessage;
+        if (operation != NIM_DELETE) {
+            HICON icon = quota_icon(i, snapshot.providers[i].quota.latest,
+                                    snapshot.providers[i].status != Status::Disabled);
+            if (app.tray_icons[i])
+                DestroyIcon(app.tray_icons[i]);
+            app.tray_icons[i] = icon;
+            n.hIcon = icon ? icon : LoadIconW(instance, MAKEINTRESOURCEW(101));
+            auto tip = std::wstring(i ? L"Codex" : L"Claude") + L" · " + tr("quota.remaining") + L"\n" +
+                       tr("quota.short") + L" " + percent(snapshot.providers[i].quota.latest.short_term) +
+                       L" | " + tr("quota.week") + L" " + percent(snapshot.providers[i].quota.latest.weekly);
+            if (snapshot.providers[i].quota.latest.observed &&
+                now_seconds() > snapshot.providers[i].quota.latest.observed + 900)
+                tip += L"\n" + std::wstring(tr("quota.stale"));
+            wcsncpy_s(n.szTip, tip.c_str(), _TRUNCATE);
+        }
+        if (!Shell_NotifyIconW(operation, &n) && operation == NIM_ADD && !mini.visible())
+            ShowWindow(app.window, SW_SHOW);
+        if (operation == NIM_ADD) {
+            n.uVersion = NOTIFYICON_VERSION_4;
+            Shell_NotifyIconW(NIM_SETVERSION, &n);
+        }
+        if (operation == NIM_DELETE && app.tray_icons[i]) {
+            DestroyIcon(app.tray_icons[i]);
+            app.tray_icons[i] = nullptr;
+        }
+    }
+    if (operation == NIM_DELETE)
+        app.tray_active = false;
+}
+LRESULT CALLBACK chart_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == WM_CREATE) {
+        SetWindowLongPtrW(
+            window, GWLP_USERDATA,
+            reinterpret_cast<CREATESTRUCTW *>(l)->lpCreateParams
+                ? reinterpret_cast<INT_PTR>(reinterpret_cast<CREATESTRUCTW *>(l)->lpCreateParams)
+                : 0);
+        return 0;
+    }
+    if (message == WM_PAINT || message == WM_PRINTCLIENT) {
+        PAINTSTRUCT paint{};
+        HDC dc = message == WM_PRINTCLIENT ? reinterpret_cast<HDC>(w) : BeginPaint(window, &paint);
+        RECT bounds{};
+        GetClientRect(window, &bounds);
+        FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
+        int index = static_cast<int>(GetWindowLongPtrW(window, GWLP_USERDATA)), provider = index / 2,
+            slot = index % 2;
+        QuotaStore store;
+        {
+            Lock lock;
+            store = app.snapshot.providers[provider].quota;
+        }
+        const auto &value = slot ? store.latest.weekly : store.latest.short_term;
+        uint64_t now = now_seconds();
+        bool available = quota_current(value, now);
+        UINT dpi = window_dpi(window);
+        auto x = [&](int n) { return scaled(n, dpi); };
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        auto old_font = SelectObject(dc, app.font);
+        std::wstring title = slot ? tr("quota.week") : tr("quota.short");
+        if (value.available && !slot)
+            title = value.minutes % 60 == 0
+                        ? locale.format("quota.hours", {{L"hours", std::to_wstring(value.minutes / 60)}})
+                        : locale.format("quota.minutes", {{L"minutes", std::to_wstring(value.minutes)}});
+        RECT r{x(8), x(2), bounds.right - x(8), x(23)};
+        DrawTextW(dc, title.c_str(), -1, &r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, app.number_font);
+        r.top = x(24);
+        r.bottom = x(55);
+        auto label = percent(value);
+        DrawTextW(dc, label.c_str(), -1, &r, DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(dc, app.font);
+        r.left = x(90);
+        r.top = x(30);
+        r.bottom = x(52);
+        DrawTextW(dc, tr("quota.remaining"), -1, &r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        RECT track{x(8), x(60), bounds.right - x(8), x(67)};
+        FillRect(dc, &track, GetSysColorBrush(COLOR_3DFACE));
+        if (available) {
+            track.right = track.left + MulDiv(track.right - track.left, value.remaining, 10000);
+            HBRUSH brush = CreateSolidBrush(quota_color(value.remaining));
+            FillRect(dc, &track, brush);
+            DeleteObject(brush);
+        }
+        RECT graph{x(8), x(78), bounds.right - x(8), x(114)};
+        HPEN grid = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DSHADOW));
+        auto old_pen = SelectObject(dc, grid);
+        MoveToEx(dc, graph.left, graph.bottom, nullptr);
+        LineTo(dc, graph.right, graph.bottom);
+        SelectObject(dc, old_pen);
+        DeleteObject(grid);
+        std::vector<POINT> points;
+        uint64_t duration = value.minutes * 60;
+        uint64_t end = value.resets ? value.resets : now, start = end > duration ? end - duration : 0;
+        if (available && duration) {
+            auto add_point = [&](const QuotaSnapshot &sample) {
+                const auto &v = slot ? sample.weekly : sample.short_term;
+                if (v.available && v.resets == value.resets && v.minutes == value.minutes &&
+                    sample.plan == store.latest.plan && sample.observed >= start &&
+                    sample.observed <= std::min(end, now))
+                    points.push_back({graph.left + static_cast<LONG>((sample.observed - start) *
+                                                                     (graph.right - graph.left) / duration),
+                                      graph.bottom - MulDiv(graph.bottom - graph.top, v.remaining, 10000)});
+            };
+            for (const auto &sample : store.history)
+                add_point(sample);
+            if (store.history.empty() || store.history.back().observed != store.latest.observed)
+                add_point(store.latest);
+        }
+        if (!points.empty()) {
+            HPEN pen = CreatePen(PS_SOLID, x(2), quota_color(value.remaining));
+            old_pen = SelectObject(dc, pen);
+            if (points.size() > 1)
+                Polyline(dc, points.data(), static_cast<int>(points.size()));
+            auto dot = points.back();
+            Ellipse(dc, dot.x - x(2), dot.y - x(2), dot.x + x(3), dot.y + x(3));
+            SelectObject(dc, old_pen);
+            DeleteObject(pen);
+        } else {
+            auto text = available ? tr("quota.history_empty") : tr("quota.no_data");
+            r = graph;
+            DrawTextW(dc, text, -1, &r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        }
+        std::wstring reset;
+        if (value.available && value.resets && value.resets <= now)
+            reset = tr("quota.await_reset");
+        else if (available && value.resets) {
+            uint64_t seconds = value.resets - now, hours = seconds / 3600, minutes = (seconds % 3600) / 60;
+            reset = locale.format(
+                "quota.reset", {{L"hours", std::to_wstring(hours)}, {L"minutes", std::to_wstring(minutes)}});
+        } else
+            reset = tr("quota.reset_unknown");
+        r = {x(8), x(121), bounds.right - x(8), x(144)};
+        DrawTextW(dc, reset.c_str(), -1, &r, DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, old_font);
+        if (message == WM_PAINT)
+            EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, w, l);
 }
 HWND control(HWND owner, const wchar_t *cls, const wchar_t *text, DWORD style, int id, int x, int y, int w,
              int h, UINT dpi, HFONT font) {
@@ -129,63 +349,79 @@ void build_main() {
         return c;
     };
     add(L"STATIC", L"AI Mon", 0, 0, 24, 20, 220, 36, app.title_font);
-    add(L"STATIC", tr("summary.today"), 0, 0, 24, 62, 490, 22);
+    add(L"STATIC", tr("quota.heading"), 0, 0, 24, 60, 528, 22);
     for (int i = 0; i < 2; ++i) {
-        int y = 100 + i * 162;
-        add(L"BUTTON", i == 0 ? L"Claude Code" : L"Codex", BS_GROUPBOX, 0, 24, y, 528, 148);
-        add(L"STATIC", tr("summary.input"), 0, 0, 42, y + 28, 170, 20);
-        add(L"STATIC", tr("summary.output"), 0, 0, 294, y + 28, 170, 20);
-        app.input[i] = add(L"STATIC", L"—", SS_ENDELLIPSIS, 0, 42, y + 51, 240, 30, app.number_font);
-        app.output[i] = add(L"STATIC", L"—", SS_ENDELLIPSIS, 0, 294, y + 51, 240, 30, app.number_font);
-        app.cache[i] =
-            add(L"STATIC", locale.format("summary.cache", {{L"read", L"—"}, {L"write", L"—"}}).c_str(),
-                SS_ENDELLIPSIS, 0, 42, y + 86, 490, 20);
-        app.status[i] = add(L"STATIC", tr("status.collecting"), SS_ENDELLIPSIS, 0, 42, y + 113, 490, 20);
+        int y = 88 + i * 230;
+        add(L"BUTTON", i ? L"Codex" : L"Claude Code", BS_GROUPBOX, 0, 24, y, 528, 216);
+        for (int slot = 0; slot < 2; ++slot) {
+            HWND chart = CreateWindowExW(
+                0, ChartClass, L"", WS_CHILD | WS_VISIBLE, scaled(42 + slot * 252, app.dpi),
+                scaled(y + 24, app.dpi), scaled(240, app.dpi), scaled(146, app.dpi), app.window, nullptr,
+                instance, reinterpret_cast<void *>(static_cast<INT_PTR>(i * 2 + slot)));
+            app.chart[i][slot] = chart;
+            app.controls.push_back(chart);
+        }
+        app.cache[i] = add(L"STATIC", L"", SS_ENDELLIPSIS, 0, 42, y + 175, 490, 18);
+        app.status[i] = add(L"STATIC", tr("status.collecting"), SS_ENDELLIPSIS, 0, 42, y + 195, 490, 18);
     }
-    app.note = add(L"STATIC", tr("note.scope"), 0, 0, 24, 430, 528, 42);
-    add(L"BUTTON", tr("action.refresh"), WS_TABSTOP | BS_PUSHBUTTON, Refresh, 24, 486, 132, 34);
-    add(L"BUTTON", tr("action.settings"), WS_TABSTOP | BS_PUSHBUTTON, Configure, 166, 486, 96, 34);
-    add(L"BUTTON", tr("action.about"), WS_TABSTOP | BS_PUSHBUTTON, About, 456, 486, 96, 34);
+    app.note = add(L"STATIC", tr("quota.note"), 0, 0, 24, 550, 528, 42);
+    add(L"BUTTON", tr("action.refresh"), WS_TABSTOP | BS_PUSHBUTTON, Refresh, 24, 606, 132, 34);
+    add(L"BUTTON", tr("action.settings"), WS_TABSTOP | BS_PUSHBUTTON, Configure, 166, 606, 96, 34);
+    add(L"BUTTON", tr("mini.action"), WS_TABSTOP | BS_PUSHBUTTON, Mini, 274, 606, 170, 34);
+    add(L"BUTTON", tr("action.about"), WS_TABSTOP | BS_PUSHBUTTON, About, 456, 606, 96, 34);
 }
 void render() {
     Snapshot snapshot;
+    ClaudeProbe probe;
     bool failed;
     {
         Lock lock;
         snapshot = app.snapshot;
+        probe = app.claude_probe;
         failed = app.worker_failed;
     }
+    mini.update(snapshot);
     for (int i = 0; i < 2; ++i) {
         const auto &row = snapshot.providers[i];
-        bool available = row.total.events > 0 && row.status != Status::Disabled && !row.total.overflow;
-        SetWindowTextW(app.input[i], available ? grouped(row.total.tokens.input).c_str() : L"—");
-        SetWindowTextW(app.output[i], available ? grouped(row.total.tokens.output).c_str() : L"—");
-        std::wstring cache =
-            locale.format("summary.cache", {{L"read", available ? grouped(row.total.tokens.read) : L"—"},
-                                            {L"write", available ? grouped(row.total.tokens.write) : L"—"}});
-        SetWindowTextW(app.cache[i], cache.c_str());
-        std::wstring status = tr((std::string("status.") + status_code(row.status)).c_str());
-        if (row.success) {
-            uint64_t age = now_seconds() > row.success ? now_seconds() - row.success : 0;
-            status =
-                locale.format("summary.updated", {{L"status", status}, {L"seconds", std::to_wstring(age)}});
+        auto local = locale.format("quota.local_tokens", {{L"input", grouped(row.total.tokens.input)},
+                                                          {L"output", grouped(row.total.tokens.output)}});
+        SetWindowTextW(app.cache[i], local.c_str());
+        std::wstring status;
+        if (row.status == Status::Disabled)
+            status = tr("status.disabled");
+        else if (row.quota.latest.observed) {
+            uint64_t age =
+                now_seconds() > row.quota.latest.observed ? now_seconds() - row.quota.latest.observed : 0;
+            status = locale.format("quota.updated", {{L"minutes", std::to_wstring(age / 60)}});
+            if (age > 900)
+                status += L" · " + std::wstring(tr("quota.stale"));
+            if (row.status == Status::ReadError)
+                status += L" · " + std::wstring(tr("status.read_error"));
+        } else
+            status = tr(i ? "quota.wait_codex" : "quota.claude_waiting");
+        if (!i && row.status != Status::Disabled && probe != ClaudeProbe::Ready) {
+            const char *key = probe == ClaudeProbe::Missing       ? "quota.claude_missing"
+                              : probe == ClaudeProbe::Failed      ? "quota.claude_failed"
+                              : probe == ClaudeProbe::Unavailable ? "quota.claude_unavailable"
+                                                                  : nullptr;
+            if (key)
+                status = tr(key);
         }
         SetWindowTextW(app.status[i], status.c_str());
+        for (HWND chart : app.chart[i])
+            InvalidateRect(chart, nullptr, FALSE);
     }
-    const wchar_t *note = tr("note.scope");
+    const wchar_t *note = tr("quota.note");
     if (failed)
         note = tr("note.worker_error");
     else if (snapshot.cache_error)
         note = tr("note.cache_error");
     else if (app.settings_warning)
         note = tr("note.settings_error");
-    else if (snapshot.limited)
-        note = tr("note.limited");
-    else if (snapshot.cache_rebuilt)
-        note = tr("note.rebuilt");
-    if (locale.warning() && !failed && !snapshot.cache_error && !app.settings_warning && !snapshot.limited)
+    else if (locale.warning())
         note = tr("note.language_error");
     SetWindowTextW(app.note, note);
+    notify_icon(NIM_MODIFY);
 }
 DWORD WINAPI worker_main(void *) {
     try {
@@ -198,6 +434,8 @@ DWORD WINAPI worker_main(void *) {
         collector.configure(initial);
         collector.load();
         Watch watches[2];
+        uint64_t last_probe = 0;
+        bool requested_probe = true;
         bool immediate = true;
         while (WaitForSingleObject(app.stop.value, 0) != WAIT_OBJECT_0) {
             Settings settings;
@@ -215,6 +453,15 @@ DWORD WINAPI worker_main(void *) {
                     watches[i].start(settings.roots[i]);
             }
             if (immediate) {
+                auto tick = GetTickCount64();
+                if (app.probe_enabled && settings.enabled[0] &&
+                    (!last_probe || tick - last_probe >= (requested_probe ? 15000ULL : 120000ULL))) {
+                    auto result = probe_claude(app.data_dir, app.stop.value);
+                    last_probe = GetTickCount64();
+                    requested_probe = false;
+                    Lock lock;
+                    app.claude_probe = result;
+                }
                 auto snapshot = collector.scan(app.stop.value);
                 {
                     Lock lock;
@@ -239,6 +486,8 @@ DWORD WINAPI worker_main(void *) {
                     ++count;
                 }
             DWORD result = WaitForMultipleObjects(count, handles, FALSE, delay);
+            if (result == WAIT_OBJECT_0 + 1)
+                requested_probe = true;
             if (result == WAIT_OBJECT_0)
                 break;
             if (result >= WAIT_OBJECT_0 + 2 && result < WAIT_OBJECT_0 + count) {
@@ -273,17 +522,26 @@ void about(HWND owner) {
                 license = wide(std::string(text, SizeofResource(instance, r)));
         }
     }
-    std::wstring message = locale.format("about.body", {{L"version", L"0.2.0"}}) + license;
+    std::wstring message = locale.format("about.body", {{L"version", L"0.3.4"}}) + license;
     MessageBoxW(owner, message.c_str(), tr("about.title"), MB_OK | MB_ICONINFORMATION);
 }
 struct SettingsUI {
     HFONT font = nullptr;
     UINT dpi = 96;
     HWND enabled[2]{}, path[2]{}, interval = nullptr, show = nullptr, language = nullptr;
+    HWND startup = nullptr, transparency = nullptr, transparency_label = nullptr;
+    std::wstring startup_before;
+    bool startup_selected = false;
     std::vector<std::string> language_ids;
     std::vector<HWND> controls;
     Settings value;
 } settings_ui;
+void preview_transparency() {
+    int transparency = static_cast<int>(SendMessageW(settings_ui.transparency, TBM_GETPOS, 0, 0));
+    auto label = std::to_wstring(transparency) + L"%";
+    SetWindowTextW(settings_ui.transparency_label, label.c_str());
+    mini.opacity(100 - transparency);
+}
 std::wstring text_of(HWND c) {
     int n = GetWindowTextLengthW(c);
     std::wstring result(n + 1, 0);
@@ -345,10 +603,25 @@ void build_settings(HWND window) {
     }
     SendMessageW(settings_ui.language, CB_SETCURSEL, selected - settings_ui.language_ids.begin(), 0);
     add(L"STATIC", tr("settings.language_hint"), 0, 0, 20, 356, 535, 40);
-    add(L"STATIC", tr("settings.folder_hint"), 0, 0, 20, 400, 535, 40);
-    add(L"BUTTON", tr("action.default_paths"), WS_TABSTOP | BS_PUSHBUTTON, 240, 20, 458, 110, 34);
-    add(L"BUTTON", tr("action.save"), WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, 345, 458, 100, 34);
-    add(L"BUTTON", tr("action.cancel"), WS_TABSTOP | BS_PUSHBUTTON, IDCANCEL, 455, 458, 100, 34);
+    add(L"BUTTON", tr("quota.connect_button"), WS_TABSTOP | BS_PUSHBUTTON, 250, 20, 402, 260, 30);
+    add(L"BUTTON", tr("quota.disconnect_button"), WS_TABSTOP | BS_PUSHBUTTON, 251, 290, 402, 265, 30);
+    settings_ui.startup =
+        add(L"BUTTON", tr("settings.autostart"), WS_TABSTOP | BS_AUTOCHECKBOX, 233, 20, 444, 535, 28);
+    SendMessageW(settings_ui.startup, BM_SETCHECK, settings_ui.startup_selected ? BST_CHECKED : BST_UNCHECKED,
+                 0);
+    EnableWindow(settings_ui.startup, app.startup_controls);
+    add(L"STATIC", tr("settings.transparency"), 0, 0, 20, 488, 180, 24);
+    settings_ui.transparency =
+        add(TRACKBAR_CLASSW, L"", WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS, 234, 200, 478, 285, 38);
+    SendMessageW(settings_ui.transparency, TBM_SETRANGE, TRUE, MAKELPARAM(0, 70));
+    SendMessageW(settings_ui.transparency, TBM_SETTICFREQ, 10, 0);
+    SendMessageW(settings_ui.transparency, TBM_SETPOS, TRUE, 100 - settings_ui.value.mini_opacity);
+    settings_ui.transparency_label = add(L"STATIC", L"", 0, 235, 495, 486, 60, 24);
+    preview_transparency();
+    add(L"STATIC", tr("settings.transparency_hint"), 0, 0, 20, 520, 535, 30);
+    add(L"BUTTON", tr("action.default_paths"), WS_TABSTOP | BS_PUSHBUTTON, 240, 20, 566, 110, 34);
+    add(L"BUTTON", tr("action.save"), WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK, 345, 566, 100, 34);
+    add(L"BUTTON", tr("action.cancel"), WS_TABSTOP | BS_PUSHBUTTON, IDCANCEL, 455, 566, 100, 34);
 }
 bool read_settings_ui(bool validate) {
     Settings s = settings_ui.value;
@@ -366,6 +639,8 @@ bool read_settings_ui(bool validate) {
         return false;
     s.interval = static_cast<int>(v);
     s.show_start = SendMessageW(settings_ui.show, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    s.mini_opacity = 100 - static_cast<int>(SendMessageW(settings_ui.transparency, TBM_GETPOS, 0, 0));
+    settings_ui.startup_selected = SendMessageW(settings_ui.startup, BM_GETCHECK, 0, 0) == BST_CHECKED;
     LRESULT selected = SendMessageW(settings_ui.language, CB_GETCURSEL, 0, 0);
     if (selected < 0 || static_cast<size_t>(selected) >= settings_ui.language_ids.size())
         return false;
@@ -380,9 +655,16 @@ LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             Lock lock;
             settings_ui.value = app.settings;
         }
+        settings_ui.startup_before = app.startup_controls ? startup_value() : L"";
+        settings_ui.startup_selected =
+            settings_ui.startup_before == startup_command(app.executable, app.data_dir);
         build_settings(window);
         return 0;
     }
+    case WM_HSCROLL:
+        if (reinterpret_cast<HWND>(l) == settings_ui.transparency)
+            preview_transparency();
+        return 0;
     case WM_DPICHANGED: {
         read_settings_ui(false);
         auto rect = reinterpret_cast<RECT *>(l);
@@ -392,6 +674,23 @@ LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_COMMAND:
+        if (LOWORD(w) == 250 || LOWORD(w) == 251) {
+            wchar_t executable[32768]{};
+            GetModuleFileNameW(nullptr, executable, 32768);
+            auto result = LOWORD(w) == 250 ? connect_claude(claude_settings_path(), app.data_dir, executable)
+                                           : disconnect_claude(claude_settings_path(), app.data_dir);
+            const char *key = result == BridgeResult::Done
+                                  ? (LOWORD(w) == 250 ? "quota.connected" : "quota.disconnected")
+                              : result == BridgeResult::AlreadyConnected ? "quota.connected"
+                              : result == BridgeResult::Changed          ? "quota.bridge_changed"
+                                                                         : "quota.bridge_failed";
+            MessageBoxW(window, tr(key), tr("settings.title"),
+                        MB_OK | (result == BridgeResult::Failed || result == BridgeResult::Changed
+                                     ? MB_ICONWARNING
+                                     : MB_ICONINFORMATION));
+            SetEvent(app.wake.value);
+            return 0;
+        }
         if (LOWORD(w) == 240) {
             auto s = default_settings();
             for (int i = 0; i < 2; ++i)
@@ -407,6 +706,17 @@ LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             if (!save_settings(join(app.data_dir, L"settings.json"), settings_ui.value)) {
                 MessageBoxW(window, tr("settings.save_error_text"), tr("settings.save_error_title"),
                             MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            auto command = startup_command(app.executable, app.data_dir);
+            bool requested = SendMessageW(settings_ui.startup, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            bool changed = requested != (settings_ui.startup_before == command);
+            if (app.startup_controls && changed &&
+                (startup_value() != settings_ui.startup_before ||
+                 !set_startup_value(requested ? command : L""))) {
+                save_settings(join(app.data_dir, L"settings.json"), app.settings);
+                MessageBoxW(window, tr("settings.startup_error"), tr("settings.save_error_title"),
+                            MB_OK | MB_ICONWARNING);
                 return 0;
             }
             {
@@ -431,6 +741,7 @@ LRESULT CALLBACK settings_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
         DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        mini.opacity(app.settings.mini_opacity);
         if (settings_ui.font)
             DeleteObject(settings_ui.font);
         settings_ui.font = nullptr;
@@ -450,7 +761,7 @@ void open_settings() {
     locale.discover();
     show_window();
     UINT dpi = app.dpi;
-    RECT r{0, 0, scaled(575, dpi), scaled(516, dpi)};
+    RECT r{0, 0, scaled(575, dpi), scaled(620, dpi)};
     adjust_rect(r, WS_CAPTION | WS_SYSMENU, WS_EX_DLGMODALFRAME, dpi);
     RECT parent{};
     GetWindowRect(app.window, &parent);
@@ -497,8 +808,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
         render();
         return 0;
     case WM_TIMER:
-        if (IsWindowVisible(window))
-            render();
+        render();
         return 0;
     case TrayMessage: {
         UINT event = LOWORD(l);
@@ -512,6 +822,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             GetCursorPos(&point);
             HMENU menu = CreatePopupMenu();
             AppendMenuW(menu, MF_STRING, Open, tr("action.open"));
+            AppendMenuW(menu, MF_STRING | (mini.visible() ? MF_CHECKED : 0), Mini, tr("mini.action"));
             AppendMenuW(menu, MF_STRING, Refresh, tr("action.refresh"));
             AppendMenuW(menu, MF_STRING, Configure, tr("action.settings"));
             AppendMenuW(menu, MF_STRING, About, tr("action.about"));
@@ -531,6 +842,9 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
         switch (LOWORD(w)) {
         case Open:
             show_window();
+            break;
+        case Mini:
+            mini.toggle();
             break;
         case Refresh:
             SetEvent(app.wake.value);
@@ -562,6 +876,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        mini.shutdown();
         notify_icon(NIM_DELETE);
         KillTimer(window, 1);
         SetEvent(app.stop.value);
@@ -610,6 +925,7 @@ int headless(int argc, wchar_t **argv) {
         put(p, "provider", std::string(i == 0 ? "claude" : "codex"));
         put(p, "events", snapshot.providers[i].total.events);
         put(p, "status", std::string(status_code(snapshot.providers[i].status)));
+        cJSON_AddItemToObject(p, "quota", quota_json(snapshot.providers[i].quota.latest));
         cJSON_AddItemToArray(rows, p);
     }
     put(doc.get(), "bytes_read", collector.bytes_read());
@@ -618,6 +934,9 @@ int headless(int argc, wchar_t **argv) {
 }
 int run(HINSTANCE module) {
     instance = module;
+    wchar_t executable[32768]{};
+    GetModuleFileNameW(nullptr, executable, 32768);
+    app.executable = executable;
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv && argc > 1 && wcscmp(argv[1], L"--scan") == 0) {
@@ -626,19 +945,41 @@ int run(HINSTANCE module) {
         return result;
     }
     std::wstring custom_data;
-    bool smoke = false;
+    bool smoke = false, bridge_mode = false, probe_mode = false, startup_mode = false, remove_startup = false;
     std::string language_override;
     for (int i = 1; argv && i < argc; ++i) {
         if (wcscmp(argv[i], L"--data-dir") == 0 && i + 1 < argc)
             custom_data = canonical(argv[++i]);
         else if (wcscmp(argv[i], L"--language") == 0 && i + 1 < argc)
             language_override = utf8(argv[++i]);
+        else if (wcscmp(argv[i], L"--claude-statusline") == 0)
+            bridge_mode = true;
+        else if (wcscmp(argv[i], L"--claude-probe") == 0)
+            probe_mode = true;
+        else if (wcscmp(argv[i], L"--no-claude-probe") == 0)
+            app.probe_enabled = false;
+        else if (wcscmp(argv[i], L"--no-startup-registration") == 0)
+            app.startup_controls = false;
+        else if (wcscmp(argv[i], L"--startup") == 0)
+            startup_mode = true;
+        else if (wcscmp(argv[i], L"--remove-startup") == 0)
+            remove_startup = true;
         else if (wcscmp(argv[i], L"--smoke-test") == 0)
             smoke = true;
     }
     if (argv)
         LocalFree(argv);
     app.data_dir = custom_data.empty() ? join(env(L"LOCALAPPDATA"), L"AI Mon") : custom_data;
+    if (remove_startup)
+        return remove_startup_for(app.executable) ? 0 : 1;
+    if (bridge_mode)
+        return claude_statusline(app.data_dir);
+    if (probe_mode)
+        return probe_claude(app.data_dir) == ClaudeProbe::Ready ? 0 : 4;
+    if (smoke) {
+        app.probe_enabled = false;
+        app.startup_controls = false;
+    }
     if (!locale.initialize(instance, app.data_dir))
         return 1;
     if (app.data_dir.empty() || !ensure_directory(app.data_dir)) {
@@ -654,7 +995,7 @@ int run(HINSTANCE module) {
         return 1;
     if (mutex_error == ERROR_ALREADY_EXISTS) {
         HWND prior = FindWindowW(main_class_name.c_str(), nullptr);
-        if (prior) {
+        if (prior && !startup_mode) {
             ShowWindow(prior, SW_RESTORE);
             SetForegroundWindow(prior);
         }
@@ -680,7 +1021,7 @@ int run(HINSTANCE module) {
     app.wake.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
     if (!app.stop.valid() || !app.wake.valid())
         return 1;
-    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES};
     InitCommonControlsEx(&controls);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -693,6 +1034,10 @@ int run(HINSTANCE module) {
     wc.lpszClassName = main_class_name.c_str();
     if (!RegisterClassExW(&wc))
         return 1;
+    wc.lpfnWndProc = chart_proc;
+    wc.lpszClassName = ChartClass;
+    if (!RegisterClassExW(&wc))
+        return 1;
     wc.lpfnWndProc = settings_proc;
     wc.lpszClassName = SettingsClass;
     if (!RegisterClassExW(&wc))
@@ -702,7 +1047,7 @@ int run(HINSTANCE module) {
     UINT dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
     if (dc)
         ReleaseDC(nullptr, dc);
-    RECT rect{0, 0, scaled(576, dpi), scaled(544, dpi)};
+    RECT rect{0, 0, scaled(576, dpi), scaled(660, dpi)};
     adjust_rect(rect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, WS_EX_CONTROLPARENT, dpi);
     HWND window = CreateWindowExW(WS_EX_CONTROLPARENT, main_class_name.c_str(), L"AI Mon",
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT,
@@ -710,6 +1055,11 @@ int run(HINSTANCE module) {
                                   nullptr, instance, nullptr);
     if (!window)
         return 1;
+    if (!mini.initialize(instance, window, app.data_dir, locale)) {
+        DestroyWindow(window);
+        return 1;
+    }
+    mini.opacity(app.settings.mini_opacity);
     if (!smoke)
         notify_icon(NIM_ADD);
     SetTimer(window, 1, 1000, nullptr);
@@ -718,14 +1068,14 @@ int run(HINSTANCE module) {
         DestroyWindow(window);
         return 1;
     }
-    if (app.settings.show_start && !smoke)
+    if (app.settings.show_start && !smoke && !startup_mode)
         ShowWindow(window, SW_SHOW);
     if (smoke)
         SetTimer(window, 2, 1500, nullptr);
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (smoke && msg.message == WM_TIMER && msg.wParam == 2) {
-            bool valid = app.controls.size() == 20 && text_of(app.input[0]) == L"—" &&
+            bool valid = app.controls.size() == 17 && IsWindow(app.chart[0][0]) &&
                          text_of(app.status[0]) == tr("status.disabled");
             const std::string initial_language = app.settings.language;
             for (const std::string &language : {std::string("en"), std::string("ko"), initial_language}) {

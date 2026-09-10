@@ -20,6 +20,7 @@ void Collector::configure(const Settings &s) {
                     ++it;
             }
             success_[i] = 0;
+            quotas_[i] = {};
             dirty_ = true;
         }
     settings_ = s;
@@ -98,6 +99,11 @@ bool Collector::read_file(const FileInfo &file, int provider, FileState &s, HAND
                 if (!s.discarding && !line.empty()) {
                     if (line.back() == '\r')
                         line.pop_back();
+                    if (provider == 1) {
+                        QuotaSnapshot quota;
+                        if (parse_codex_quota(line, quota))
+                            quotas_[1].insert(quota, now_seconds());
+                    }
                     UsageEvent e;
                     auto result = parse_usage(provider, line, source, s.parser, e);
                     if (result == ParseResult::Event && e.time + Retention >= now_seconds() &&
@@ -210,6 +216,25 @@ Snapshot Collector::scan(HANDLE stop) {
             row.success = success_[provider];
         }
     }
+    if (settings_.enabled[0]) {
+        std::string text;
+        if (read_text(join(data_dir_, L"claude-quota.json"), text, 8192)) {
+            auto doc = parse(text);
+            QuotaSnapshot quota;
+            if (quota_json(doc.get(), quota) && quotas_[0].insert(quota, now_seconds()))
+                dirty_ = true;
+        } else if (GetFileAttributesW(join(data_dir_, L"claude-quota.json").c_str()) ==
+                       INVALID_FILE_ATTRIBUTES &&
+                   GetFileAttributesW(join(data_dir_, L"claude-statusline-backup.json").c_str()) ==
+                       INVALID_FILE_ATTRIBUTES &&
+                   quotas_[0].latest.observed) {
+            quotas_[0] = {};
+            dirty_ = true;
+        }
+    }
+    for (int provider = 0; provider < 2; ++provider)
+        if (settings_.enabled[provider])
+            snapshot.providers[provider].quota = quotas_[provider];
     if (dirty_ && !(stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)) {
         cache_error_ = !save();
     }
@@ -220,8 +245,17 @@ Snapshot Collector::scan(HANDLE stop) {
 }
 bool Collector::save() {
     auto doc = json(cJSON_CreateObject());
-    put(doc.get(), "version", uint64_t(1));
+    put(doc.get(), "version", uint64_t(2));
     put(doc.get(), "limited", store_.limited);
+    auto quotas = cJSON_AddArrayToObject(doc.get(), "quotas");
+    for (const auto &store : quotas_) {
+        auto p = cJSON_CreateObject();
+        cJSON_AddItemToObject(p, "latest", quota_json(store.latest));
+        auto history = cJSON_AddArrayToObject(p, "history");
+        for (const auto &sample : store.history)
+            cJSON_AddItemToArray(history, quota_json(sample));
+        cJSON_AddItemToArray(quotas, p);
+    }
     auto roots = cJSON_AddArrayToObject(doc.get(), "roots");
     for (const auto &root : settings_.roots)
         cJSON_AddItemToArray(roots, cJSON_CreateString(utf8(root).c_str()));
@@ -286,7 +320,7 @@ bool Collector::load() {
         return false;
     auto doc = parse(text);
     uint64_t version = 0;
-    if (!doc || !number(field(doc.get(), "version"), version) || version != 1)
+    if (!doc || !number(field(doc.get(), "version"), version) || (version != 1 && version != 2))
         return false;
     auto roots = field(doc.get(), "roots");
     auto events = field(doc.get(), "events");
@@ -334,13 +368,43 @@ bool Collector::load() {
         s.malformed = cJSON_IsTrue(field(p, "malformed"));
         s.unsupported = cJSON_IsTrue(field(p, "unsupported"));
         s.discarding = cJSON_IsTrue(field(p, "discarding"));
+        // Preserve old token events; replay Codex files once to discover quotas.
+        if (version == 1 && s.provider == 1) {
+            s = {};
+            s.provider = 1;
+        }
         if (matching[s.provider])
             restored.emplace(filePath, std::move(s));
     }
+    auto quota_array = field(doc.get(), "quotas");
+    if (version == 2 && (!cJSON_IsArray(quota_array) || cJSON_GetArraySize(quota_array) != 2))
+        return false;
+    std::array<QuotaStore, 2> quotas;
+    for (int i = 0; version == 2 && i < 2; ++i) {
+        auto p = cJSON_GetArrayItem(quota_array, i);
+        QuotaSnapshot latest;
+        if (!quota_json(field(p, "latest"), latest))
+            return false;
+        auto history = field(p, "history");
+        if (!cJSON_IsArray(history) || cJSON_GetArraySize(history) > static_cast<int>(MaxQuotaHistory))
+            return false;
+        const cJSON *sample = nullptr;
+        cJSON_ArrayForEach(sample, history) {
+            QuotaSnapshot value;
+            if (!quota_json(sample, value) || value.observed > latest.observed)
+                return false;
+            if (matching[i])
+                quotas[i].insert(value, now_seconds());
+        }
+        if (matching[i])
+            quotas[i].insert(latest, now_seconds());
+    }
+    quotas_ = std::move(quotas);
     store.limited = cJSON_IsTrue(field(doc.get(), "limited"));
     store.prune(now_seconds());
     store_ = std::move(store);
     files_ = std::move(restored);
+    dirty_ = version == 1;
     rebuilt_ = false;
     return true;
 }

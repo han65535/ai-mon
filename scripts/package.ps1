@@ -158,13 +158,14 @@ try {
     Add-MsiRow 'LaunchCondition' @('Condition','Description') @('NOT ALLUSERS',$ui.userRequired)
     Add-MsiRow 'LaunchCondition' @('Condition','Description') @('Installed OR NOT NEWERPRODUCTS',$ui.newerInstalled)
     Add-MsiRow 'CustomAction' @('Action','Type','Source','Target') @('SetInstallLocation',51,'ARPINSTALLLOCATION','[INSTALLDIR]')
+    Add-MsiRow 'CustomAction' @('Action','Type','Source','Target') @('RemoveAutoStart',82,'AIMON_EXE','--remove-startup')
     $execute = @(
         @('FindRelatedProducts',$null,25), @('AppSearch',$null,50), @('LaunchConditions',$null,100), @('ValidateProductID',$null,700),
         @('CostInitialize',$null,800), @('FileCost',$null,900), @('CostFinalize',$null,1000),
         @('SetInstallLocation',$null,1100), @('MigrateFeatureStates',$null,1200),
         @('InstallValidate',$null,1400), @('InstallInitialize',$null,1500), @('RemoveExistingProducts','OLDPRODUCTS',1510),
         @('ProcessComponents',$null,1600), @('UnpublishFeatures',$null,1800), @('RemoveRegistryValues',$null,2600),
-        @('RemoveShortcuts',$null,3200), @('RemoveFiles',$null,3500), @('RemoveFolders',$null,3600),
+        @('RemoveShortcuts',$null,3200), @('RemoveAutoStart','Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE',3400), @('RemoveFiles',$null,3500), @('RemoveFolders',$null,3600),
         @('CreateFolders',$null,3700), @('InstallFiles',$null,4000), @('CreateShortcuts',$null,4500),
         @('WriteRegistryValues',$null,5000), @('RegisterUser',$null,6000), @('RegisterProduct',$null,6100),
         @('PublishFeatures',$null,6300), @('PublishProduct',$null,6400), @('InstallFinalize',$null,6600)

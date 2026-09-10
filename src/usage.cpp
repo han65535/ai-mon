@@ -186,6 +186,12 @@ bool load_settings(const std::wstring &path, Settings &s) {
     Settings result;
     result.interval = static_cast<int>(interval);
     result.show_start = cJSON_IsTrue(show);
+    if (const auto *opacity = field(doc.get(), "mini_opacity")) {
+        uint64_t value = 0;
+        if (!number(opacity, value) || value < 30 || value > 100)
+            return false;
+        result.mini_opacity = static_cast<int>(value);
+    }
     if (const auto *language = field(doc.get(), "language")) {
         if (!cJSON_IsString(language) || !valid_language_id(str(language)))
             return false;
@@ -208,6 +214,7 @@ bool save_settings(const std::wstring &path, const Settings &s) {
     put(doc.get(), "version", uint64_t(1));
     put(doc.get(), "interval", uint64_t(s.interval));
     put(doc.get(), "show_start", s.show_start);
+    put(doc.get(), "mini_opacity", uint64_t(s.mini_opacity));
     put(doc.get(), "language", s.language);
     auto providers = cJSON_AddArrayToObject(doc.get(), "providers");
     for (int i = 0; i < 2; ++i) {
