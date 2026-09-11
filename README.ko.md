@@ -5,7 +5,7 @@
 Claude Code와 Codex의 **계정 잔여 한도와 오늘 로컬 토큰 사용량**을 표시하는 Windows 트레이 앱입니다.
 C++17과 Win32로 만들며, 압축 전 실행 파일 1,000,000바이트 이하를 배포 조건으로 검사합니다.
 
-**다운로드:** [한국어 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-ko.msi) · [영문 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-en.msi) · [포터블 EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [전체 릴리스](https://github.com/han65535/ai-mon/releases)
+**다운로드:** [한국어 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.5-x64-ko.msi) · [영문 설치 파일](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.5-x64-en.msi) · [포터블 EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [전체 릴리스](https://github.com/han65535/ai-mon/releases)
 
 ## 스크린샷
 

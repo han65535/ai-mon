@@ -4,7 +4,7 @@
 
 A small, native Windows tray app showing **remaining subscription allowance and local token usage** for Claude Code and Codex. Built with C++17 and Win32. Both the executable and installer must stay below **1,000,000 bytes**.
 
-**Download:** [English installer](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-en.msi) · [한국어 설치](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.4-x64-ko.msi) · [Portable EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [All releases](https://github.com/han65535/ai-mon/releases)
+**Download:** [English installer](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.5-x64-en.msi) · [한국어 설치](https://github.com/han65535/ai-mon/releases/latest/download/AI-Mon-0.3.5-x64-ko.msi) · [Portable EXE](https://github.com/han65535/ai-mon/releases/latest/download/ai-mon.exe) · [All releases](https://github.com/han65535/ai-mon/releases)
 
 ## Screenshots
 

@@ -1,6 +1,6 @@
 # Remaining allowance and tray graphs
 
-AI Mon 0.3.4 prioritizes the **last-reported subscription allowance** over local token totals.
+AI Mon 0.3.5 prioritizes the **last-reported subscription allowance** over local token totals.
 
 ## What the tray shows
 
@@ -20,7 +20,7 @@ Visibility, screen position and the always-on-top preference are stored in `mini
 
 This is a standalone native window beside the taskbar. Legacy [DeskBands](https://learn.microsoft.com/en-us/windows/win32/shell/band-objects) can be hosted in the old Windows taskbar, but Microsoft documents that Windows 11 [does not let apps customize taskbar areas](https://www.microsoft.com/en-us/windows/windows-11-specifications). AI Mon keeps the compatible tray icons and a separate mini window. It does not install an Explorer extension.
 
-The mini window reuses the same snapshots as the detailed view and adds no collection process or network polling. English and Korean installers and the portable executable are available from the [0.3.4 release](https://github.com/han65535/ai-mon/releases/tag/v0.3.4).
+The mini window reuses the same snapshots as the detailed view and adds no collection process or network polling. English and Korean installers and the portable executable are available from the [0.3.5 release](https://github.com/han65535/ai-mon/releases/tag/v0.3.5).
 
 ### Transparency and automatic startup
 
