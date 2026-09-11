@@ -27,31 +27,59 @@ static bool window(const cJSON *p, bool claude, uint64_t minutes, QuotaWindow &r
     result.available = true;
     return true;
 }
-bool parse_codex_quota(const std::string &line, QuotaSnapshot &result) {
-    if (line.size() > 2 * 1024 * 1024 || line.find("\"rate_limits\"") == std::string::npos)
-        return false;
-    auto doc = parse(line);
-    auto payload = field(doc.get(), "payload");
-    if (str(doc.get(), "type") != "event_msg" || str(payload, "type") != "token_count")
-        return false;
-    auto limits = field(payload, "rate_limits");
-    if (!cJSON_IsObject(limits))
-        return false;
-    auto id = str(limits, "limit_id");
-    // Other model-specific buckets must not overwrite the main Codex allowance.
-    if (!id.empty() && id != "codex")
+bool parse_codex_account(const cJSON *response, uint64_t observed, QuotaSnapshot &result) {
+    if (!cJSON_IsObject(response) || !observed)
         return false;
     QuotaSnapshot quota;
-    quota.observed = timestamp(str(doc.get(), "timestamp"));
-    quota.plan = str(limits, "plan_type");
-    if (!quota.observed || quota.plan.size() > 64)
+    quota.observed = observed;
+    auto account = str(response, "accountId");
+    if (account.size() > 512)
+        return false;
+    if (!account.empty())
+        quota.scope = hex(hash_bytes(account.data(), account.size()));
+    const cJSON *limits = nullptr;
+    auto buckets = field(response, "rateLimitsByLimitId");
+    if (buckets && !cJSON_IsNull(buckets)) {
+        if (!cJSON_IsObject(buckets))
+            return false;
+        // Never use map order or the legacy single-bucket view as a fallback.
+        limits = field(buckets, "codex");
+        if (!limits) {
+            result = quota; // No main allowance: clear old windows, not another model's quota.
+            return true;
+        }
+    } else {
+        limits = field(response, "rateLimits");
+    }
+    if (!cJSON_IsObject(limits))
+        return false;
+    if (!field(limits, "primary") || !field(limits, "secondary"))
+        return false;
+    auto id = str(limits, "limitId");
+    auto name = str(limits, "limitName");
+    bool keyed_main = buckets && cJSON_IsObject(buckets);
+    if ((!keyed_main && id != "codex") || (!id.empty() && id != "codex") ||
+        (!name.empty() && name != "codex" && name != "Codex") || !str(limits, "normalModelSlug").empty()) {
+        result = quota;
+        return true;
+    }
+    quota.plan = str(limits, "planType");
+    if (quota.plan.size() > 64)
         return false;
     for (const char *key : {"primary", "secondary"}) {
-        QuotaWindow value;
-        if (!window(field(limits, key), false, 0, value))
+        auto p = field(limits, key);
+        if (!p) // A full RPC snapshot must explicitly describe both windows.
             return false;
-        if (!value.available)
+        if (cJSON_IsNull(p))
             continue;
+        QuotaWindow value;
+        if (!cJSON_IsObject(p) || !percentage(field(p, "usedPercent"), value.remaining) ||
+            !number(field(p, "windowDurationMins"), value.minutes) || !value.minutes || value.minutes > 44640)
+            return false;
+        auto reset = field(p, "resetsAt");
+        if (reset && !cJSON_IsNull(reset) && (!number(reset, value.resets) || value.resets > 32503680000ULL))
+            return false;
+        value.available = true;
         if (value.minutes == 10080) {
             if (quota.weekly.available)
                 return false;
@@ -126,13 +154,24 @@ static bool same(const QuotaWindow &a, const QuotaWindow &b) {
 bool QuotaStore::insert(const QuotaSnapshot &q, uint64_t now) {
     if (!q.observed || q.observed > now + 300 || q.observed + 7 * 86400 < now)
         return false;
-    bool newer = q.observed > latest.observed;
+    if (q.observed == latest.observed && q.scope == latest.scope && q.plan == latest.plan &&
+        same(q.short_term, latest.short_term) && same(q.weekly, latest.weekly))
+        return false;
+    if (q.observed >= latest.observed && q.scope != latest.scope) {
+        latest = {};
+        history.clear();
+    }
+    if (q.scope != latest.scope && q.observed < latest.observed)
+        return false;
+    bool newer = q.observed >= latest.observed;
     if (newer)
         latest = q;
     auto position = std::lower_bound(history.begin(), history.end(), q.observed,
                                      [](const auto &a, uint64_t t) { return a.observed < t; });
-    if (position != history.end() && position->observed == q.observed)
+    if (position != history.end() && position->observed == q.observed) {
+        *position = q;
         return newer;
+    }
     // Keep changes plus one sample every 30 minutes for an unchanged allowance.
     if (position != history.begin()) {
         const auto &prev = *(position - 1);
@@ -162,6 +201,7 @@ cJSON *quota_json(const QuotaSnapshot &quota) {
     auto p = cJSON_CreateObject();
     put(p, "observed", quota.observed);
     put(p, "plan", quota.plan);
+    put(p, "scope", quota.scope);
     cJSON_AddItemToObject(p, "short", write_window(quota.short_term));
     cJSON_AddItemToObject(p, "week", write_window(quota.weekly));
     return p;
@@ -185,6 +225,9 @@ bool quota_json(const cJSON *p, QuotaSnapshot &quota) {
         !read_window(field(p, "short"), result.short_term) || !read_window(field(p, "week"), result.weekly))
         return false;
     result.plan = str(p, "plan");
+    result.scope = str(p, "scope");
+    if (result.scope.size() > 64)
+        return false;
     if (result.plan.size() > 64 || (result.short_term.available && result.short_term.minutes > 1440) ||
         (result.weekly.available && result.weekly.minutes != 10080))
         return false;

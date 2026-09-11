@@ -10,7 +10,7 @@ $common = @('--target=x86_64-w64-windows-gnu','-DUNICODE','-D_UNICODE','-DWINVER
 $opt = if ($Configuration -eq 'Debug') { @('-O0','-g') } else { @('-Oz','-flto','-ffunction-sections','-fdata-sections') }
 & (Join-Path $bin 'clang.exe') @common @opt '-std=c99' '-c' (Join-Path $projectRoot 'third_party\cjson\cJSON.c') '-o' (Join-Path $out 'cjson.o')
 if ($LASTEXITCODE -ne 0) { throw 'cJSON compilation failed' }
-$sources = @('platform.cpp','usage.cpp','collector.cpp','localization.cpp','quota.cpp','claude_bridge.cpp','mini_window.cpp','startup.cpp') | ForEach-Object { Join-Path $projectRoot "src\$_" }
+$sources = @('platform.cpp','usage.cpp','collector.cpp','localization.cpp','quota.cpp','claude_bridge.cpp','codex_bridge.cpp','mini_window.cpp','startup.cpp') | ForEach-Object { Join-Path $projectRoot "src\$_" }
 $objects = @((Join-Path $out 'cjson.o'))
 Push-Location (Join-Path $projectRoot 'resources')
 try {

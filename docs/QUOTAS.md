@@ -30,13 +30,17 @@ Settings includes a 0–70% transparency slider with immediate preview. Save per
 
 The MSI's uninstall action asks the installed app to remove only a startup command belonging to that executable; upgrades preserve it. Portable users should uncheck startup before moving/deleting the executable. Tests use a separate temporary registry key, and automated UI tests disable startup registration with `--no-startup-registration`.
 
-## Codex: automatic from local logs
+## Codex: account lookup without a conversation (0.3.5)
 
-The app reads `event_msg` → `payload.type = token_count` → `rate_limits` from the configured sessions folder. Quota updates can appear even when `info` is null. It selects the main `codex` bucket (or legacy records without a bucket ID) and ignores other model-specific buckets.
+AI Mon starts the installed native `codex.exe app-server` in a hidden, bounded subprocess and calls `initialize`, `initialized`, and `account/rateLimits/read`. It does not start a thread or model turn. Lookup runs at startup and every two minutes while Codex monitoring is enabled, including when no session log changes. Refresh requests another lookup with a 15-second minimum gap. This schedule is independent of the local token scan interval.
 
-Remaining percentage is `100 - used_percent`. The app classifies windows using `window_minutes`: `10080` is weekly; a duration up to one day is short-term. It does not assume `primary` means five hours: a weekly-only `primary` is displayed only under Weekly. A reported 240-minute window is labeled four hours, and a 300-minute window five hours. Unreported windows are unknown.
+Install and sign in to Codex CLI or the Codex VS Code extension. AI Mon discovers native executables from the standard standalone/npm locations, explicit PATH, or VS Code / VS Code Insiders extensions and prefers the most recently modified candidate. It uses the CLI's normal login and `CODEX_HOME`; the configured sessions folder affects local token totals only. AI Mon never reads credential files itself or stores raw RPC responses. The child has a 20-second deadline, a 2 MiB output cap, and a kill-on-close Windows job. Shutdown cancels the lookup.
 
-These fields and their meaning are defined in the [official Codex protocol](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs). No credential file or private HTTP endpoint is used. The newest timestamp found in the configured local logs supplies the displayed account snapshot. Switching accounts without new logs can leave an older account's last-reported value visible; check its age and generate a new Codex response. Other activity is reflected only when the provider reports it back to the local client.
+Selection uses `rateLimitsByLimitId["codex"]`, independent of map order or the backward-compatible `rateLimits` field. For older CLIs without the map, `rateLimits` must explicitly identify `limitId: "codex"`; an unidentified legacy bucket stays unavailable. Model IDs, named model quotas, and model aliases are excluded. In particular, `codex_bengalfox` / GPT-5.3-Codex-Spark is not used for the main graphs. A missing main bucket clears the displayed windows. Malformed responses and network failures preserve the last successful snapshot and its original timestamp; the detail window reports lookup failure. A reported authentication-required error clears the old account quota and asks the user to sign in.
+
+Remaining percentage is `100 - usedPercent`. Windows are classified by `windowDurationMins`: 10080 is weekly and up to one day is short-term. A weekly-only `primary` stays in the Weekly graph; missing windows stay blank. Session `rate_limits` records, including automated-review sessions, are never used for allowance. They remain eligible for ordinary token counting.
+
+The [official account response schema](https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/schema/typescript/v2/GetAccountRateLimitsResponse.ts) defines the full snapshot and bucket map. Only normalized main-window values and a local fingerprint of `accountId` are persisted in `codex-quota.json`. When this fingerprint changes, Codex history is cleared rather than connecting values from different accounts. Older CLIs without an account ID cannot provide that account-change boundary.
 
 ## Claude: automatic lookup, including VS Code
 
@@ -62,7 +66,7 @@ Project or managed settings can override the user status line. If the provider s
 
 ## Local storage and migration
 
-`state.json` schema 2 persists up to 512 quota snapshots per provider alongside existing token events and checkpoints. Quota history retains up to seven days, keeps changes, and coalesces unchanged readings within 30 minutes. Old token events from schema 1 are preserved; Codex files are replayed once to discover their quota records. The existing 10 MiB state limit remains in effect.
+`state.json` schema 3 persists up to 512 quota snapshots per provider alongside existing token events and checkpoints. Quota history retains up to seven days, keeps changes, and coalesces unchanged readings within 30 minutes. Migration from schema 1 or 2 preserves token events and checkpoints but discards old Codex quota history, which could contain mixed session/model values. Claude quota history from schema 2 is retained. New Codex history starts from account lookups. The existing 10 MiB state limit remains in effect.
 
 The diagnostic `--scan` JSON includes `quota.observed`, `quota.plan`, and nullable `quota.short`/`quota.week`. Each window contains `remaining` in hundredths of one percent, `minutes`, and Unix `resets` (zero if unknown). For example, `remaining: 9500` means 95%. Missing data is `null`, not zero remaining.
 
@@ -73,8 +77,9 @@ Local token totals remain a separate secondary display. They are not a denominat
 - `scripts/test.ps1`: quota parsing, expiry, latest-record selection, bounded history, cache migration, connection/restore behavior, plus existing parser/storage/language checks.
 - `scripts/test-quota-bridge.ps1`: normalized storage, malformed input, separation from context occupancy, unchanged input forwarding, large pipe payloads, and child timeout.
 - `scripts/test-quota-ui.ps1 -Language en|ko`: four charts, receipt of fixture quota data, 100 refreshes with stable GDI handle counts, screenshot capture, and normal shutdown on a private desktop.
+- `scripts/test-codex-poll.ps1`: actual worker re-queries after two minutes with an empty sessions directory and a 300-second token scan interval, using an isolated fake Codex.
 - `scripts/test-languages.ps1`: language switching and persistence on the redesigned screen.
 
-Real Codex logs were also read successfully. A separate Windows 10 device, all display scales, provider-account switching, and a 24-hour run remain unverified.
+The native account probe also retrieved the real main Codex quota while excluding a concurrently returned Spark quota. A separate Windows 10 device, all display scales, provider-account switching, and a 24-hour run remain unverified.
 
-`--claude-probe --data-dir <folder>` performs one explicit CLI lookup for diagnostics. Exit 0 means at least one reported limit was saved; exit 4 indicates failure or unavailable limits. `--scan` remains a local-only diagnostic. `--no-claude-probe` and `--smoke-test` disable automatic subprocess lookups for isolated UI fixtures.
+`--claude-probe --data-dir <folder>` performs one explicit CLI lookup for diagnostics. Exit 0 means at least one reported limit was saved; exit 4 indicates failure or unavailable limits. `--scan` remains a local-only diagnostic. `--codex-probe --data-dir <folder>` performs one Codex account lookup with the same exit codes. Use both `--no-claude-probe --no-codex-probe` for isolated UI fixtures; `--smoke-test` disables both automatically. `--scan` reads local logs and normalized quota files without launching either CLI.

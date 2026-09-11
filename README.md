@@ -18,7 +18,7 @@ A small, native Windows tray app showing **remaining subscription allowance and 
 
 ## Run
 
-**Installer:** open `out/Installer/AI-Mon-0.3.4-x64-en.msi` (English wizard) or `AI-Mon-0.3.4-x64-ko.msi` (Korean wizard). Choose one; both install the same bilingual app for your user account under `%LOCALAPPDATA%\Programs\AI Mon`, with a Start menu shortcut. Reopen the original MSI to repair/remove, or uninstall through Windows Settings. Settings and usage cache are preserved.
+**Installer:** open `out/Installer/AI-Mon-0.3.5-x64-en.msi` (English wizard) or `AI-Mon-0.3.5-x64-ko.msi` (Korean wizard). Choose one; both install the same bilingual app for your user account under `%LOCALAPPDATA%\Programs\AI Mon`, with a Start menu shortcut. Reopen the original MSI to repair/remove, or uninstall through Windows Settings. Settings and usage cache are preserved.
 
 **Portable:** copy and run `out/Release/ai-mon.exe`. That single file includes English and Korean.
 
@@ -26,7 +26,7 @@ Targets Windows 10/11 x64, with no separate .NET, Node.js, or C++ runtime instal
 
 - Two tray icons show Claude/Codex remaining percentages. The left miniature bar is short-term, the right weekly. Click to open detailed bars, recorded history, and reset countdowns; choose **Exit** from the tray menu to quit.
 - **Mini graphs** opens a clock-height, two-row strip with short-term and weekly allowance. Drag anywhere; right-click for settings. Settings includes a transparency slider and optional Windows sign-in startup. The About dialog credits the author.
-- Codex allowance is read from local logs. Claude allowance is queried automatically through the installed, signed-in Claude Code CLI every two minutes, including when you use the VS Code extension. **Refresh** requests an earlier check. The terminal status-line connection is optional. [Setup and behavior](docs/QUOTAS.md).
+- In 0.3.5, Codex and Claude allowance are queried through their installed, signed-in CLIs every two minutes, even without a conversation on this PC. Codex uses the main account allowance; Spark/model-specific limits and session telemetry cannot overwrite it. The Codex VS Code extension's native CLI is also supported. **Refresh** requests an earlier check (at least 15 seconds apart). The Claude terminal status-line connection is optional. [Setup and behavior](docs/QUOTAS.md).
 - **Settings** controls collection folders, enabled providers, refresh interval, startup window visibility, and **Language**.
 - Choose **Automatic**, **English**, or **한국어**, then **Save**. Changes apply immediately. Automatic follows Windows display language, falling back to English.
 - Add community JSON packs under `%LOCALAPPDATA%\AI Mon\languages`, then reopen Settings. See [the translation guide](docs/LOCALIZATION.md).

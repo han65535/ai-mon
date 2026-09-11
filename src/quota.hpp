@@ -12,10 +12,11 @@ struct QuotaWindow {
 struct QuotaSnapshot {
     uint64_t observed = 0;
     std::string plan;
+    std::string scope; // Local account fingerprint; never stores credentials or raw account IDs.
     QuotaWindow short_term, weekly;
 };
 constexpr size_t MaxQuotaHistory = 512;
-bool parse_codex_quota(const std::string &line, QuotaSnapshot &quota);
+bool parse_codex_account(const cJSON *response, uint64_t observed, QuotaSnapshot &quota);
 bool parse_claude_quota(const std::string &input, uint64_t observed, QuotaSnapshot &quota);
 bool parse_claude_usage(const cJSON *usage, uint64_t observed, QuotaSnapshot &quota);
 cJSON *quota_json(const QuotaSnapshot &quota);

@@ -16,6 +16,9 @@ foreach ($minutesAgo in @(180,120,60,0)) {
     $lines += @{type='event_msg';timestamp=([DateTimeOffset]::FromUnixTimeSeconds($now-$minutesAgo*60).UtcDateTime.ToString('o'));payload=@{type='token_count';info=$null;rate_limits=@{limit_id='codex';primary=@{used_percent=(40-$minutesAgo/6);window_minutes=300;resets_at=$now+7200};secondary=@{used_percent=(55-$minutesAgo/20);window_minutes=10080;resets_at=$now+3*86400}}}} | ConvertTo-Json -Depth 7 -Compress
 }
 [IO.File]::WriteAllText((Join-Path $logs 'quota.jsonl'),($lines -join "`n")+"`n",$utf8)
+# Account RPC fixture is authoritative even when conflicting session telemetry exists.
+$codex = @{source='codex-account';limit_id='codex';observed=$now;plan='prolite';scope='fixture-account';short=@{remaining=6000;minutes=300;resets=$now+7200};week=@{remaining=4500;minutes=10080;resets=$now+3*86400}} | ConvertTo-Json -Depth 5
+[IO.File]::WriteAllText((Join-Path $testRoot 'codex-quota.json'),$codex,$utf8)
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.Text;
@@ -81,7 +84,7 @@ public static class QuotaUiTest {
         try {
             var startup=new Startup();startup.size=(uint)Marshal.SizeOf(startup);
             startup.desktop=name;
-            var cmd=new StringBuilder("\""+exe+"\" --no-claude-probe --no-startup-registration --data-dir \""+data+"\"");
+            var cmd=new StringBuilder("\""+exe+"\" --no-claude-probe --no-codex-probe --no-startup-registration --data-dir \""+data+"\"");
             if(!CreateProcess(exe,cmd,IntPtr.Zero,IntPtr.Zero,false,0x08000000,IntPtr.Zero,null,ref startup,out process)) throw new Exception("App launch failed");
             IntPtr main=IntPtr.Zero,mini=IntPtr.Zero; bool ready=false; DateTime deadline=DateTime.UtcNow.AddSeconds(15);
             while(DateTime.UtcNow<deadline && !ready) {
@@ -172,7 +175,7 @@ public static class QuotaUiTest {
             if(WaitForSingleObject(process.process,10000)!=0) throw new Exception("App shutdown timed out");
             uint exit;GetExitCodeProcess(process.process,out exit);if(exit!=0)throw new Exception("App exited with failure");
             CloseHandle(process.thread);CloseHandle(process.process);process=new ProcessInfo();
-            cmd=new StringBuilder("\""+exe+"\" --startup --no-claude-probe --no-startup-registration --data-dir \""+data+"\"");
+            cmd=new StringBuilder("\""+exe+"\" --startup --no-claude-probe --no-codex-probe --no-startup-registration --data-dir \""+data+"\"");
             if(!CreateProcess(exe,cmd,IntPtr.Zero,IntPtr.Zero,false,0x08000000,IntPtr.Zero,null,ref startup,out process))throw new Exception("Restart failed");
             main=IntPtr.Zero;mini=IntPtr.Zero;deadline=DateTime.UtcNow.AddSeconds(10);
             while(DateTime.UtcNow<deadline && (mini==IntPtr.Zero || !IsWindowVisible(mini))) {

@@ -1,6 +1,7 @@
 #include "collector.hpp"
 #include "localization.hpp"
 #include "claude_bridge.hpp"
+#include "codex_bridge.hpp"
 #include "startup.hpp"
 #include <cstdio>
 #include <stdexcept>
@@ -330,12 +331,21 @@ void language_tests(const std::wstring &root) {
     check(atomic_write(settings_file, dump(doc.get())) && !load_settings(settings_file, loaded),
           "invalid stored language rejected");
 }
-std::string quota_line(uint64_t reset, int minutes = 300, const std::string &used = "12.5",
-                       const std::string &id = "codex") {
-    return "{\"type\":\"event_msg\",\"timestamp\":\"" + iso_now() +
-           "\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"" + id +
-           "\",\"primary\":{\"used_percent\":" + used + ",\"window_minutes\":" + std::to_string(minutes) +
-           ",\"resets_at\":" + std::to_string(reset) + "},\"secondary\":null}}}";
+std::string quota_response(uint64_t reset, int minutes = 300, const std::string &used = "12.5",
+                           const std::string &id = "codex") {
+    return "{\"rateLimits\":{\"limitId\":\"" + id + "\",\"primary\":{\"usedPercent\":" + used +
+           ",\"windowDurationMins\":" + std::to_string(minutes) + ",\"resetsAt\":" + std::to_string(reset) +
+           "},\"secondary\":null}}";
+}
+bool parse_codex_fixture(const std::string &response, QuotaSnapshot &q) {
+    auto doc = parse(response);
+    return parse_codex_account(doc.get(), now_seconds(), q);
+}
+bool save_codex_fixture(const std::wstring &data, const QuotaSnapshot &q) {
+    auto doc = json(quota_json(q));
+    put(doc.get(), "source", std::string("codex-account"));
+    put(doc.get(), "limit_id", std::string("codex"));
+    return atomic_write(join(data, L"codex-quota.json"), dump(doc.get()));
 }
 void quota_tests(const std::wstring &root) {
     uint64_t now = now_seconds();
@@ -363,23 +373,24 @@ void quota_tests(const std::wstring &root) {
         usage = parse(invalid);
         check(!parse_claude_usage(usage.get(), now, q), "malformed SDK response cannot overwrite quota");
     }
-    check(parse_codex_quota(quota_line(now + 1000), q) && q.short_term.remaining == 8750 &&
+    check(parse_codex_fixture(quota_response(now + 1000), q) && q.short_term.remaining == 8750 &&
               q.short_term.minutes == 300,
-          "Codex null token info still supplies real remaining allowance");
+          "Codex account response supplies real remaining allowance");
     check(!q.weekly.available, "absent weekly quota is not invented");
-    check(parse_codex_quota(quota_line(now + 5000, 10080, "4"), q) && q.weekly.remaining == 9600 &&
+    check(parse_codex_fixture(quota_response(now + 5000, 10080, "4"), q) && q.weekly.remaining == 9600 &&
               !q.short_term.available,
           "weekly primary is classified by duration, not position");
-    check(parse_codex_quota(quota_line(now + 1000, 240), q) && q.short_term.minutes == 240,
+    check(parse_codex_fixture(quota_response(now + 1000, 240), q) && q.short_term.minutes == 240,
           "server-reported four-hour window preserved");
-    check(!parse_codex_quota(quota_line(now + 1000, 300, "101"), q) &&
-              !parse_codex_quota(quota_line(now + 1000, 300, "-1"), q),
+    check(!parse_codex_fixture(quota_response(now + 1000, 300, "101"), q) &&
+              !parse_codex_fixture(quota_response(now + 1000, 300, "-1"), q),
           "invalid percentages rejected");
-    check(!parse_codex_quota(quota_line(now + 1000, 300, "3", "other_model"), q),
+    check(parse_codex_fixture(quota_response(now + 1000, 300, "3", "other_model"), q) &&
+              !q.short_term.available && !q.weekly.available,
           "model-specific bucket cannot overwrite account quota");
-    check(parse_codex_quota(quota_line(now - 1, 300, "100"), q) && !quota_current(q.short_term, now),
+    check(parse_codex_fixture(quota_response(now - 1, 300, "100"), q) && !quota_current(q.short_term, now),
           "expired limit waits for new report, never invents reset");
-    check(parse_codex_quota(quota_line(now + 1000, 300, "0"), q) && quota_current(q.short_term, now) &&
+    check(parse_codex_fixture(quota_response(now + 1000, 300, "0"), q) && quota_current(q.short_term, now) &&
               q.short_term.remaining == 10000,
           "zero used means fully remaining");
     auto encoded = json(quota_json(q));
@@ -397,7 +408,8 @@ void quota_tests(const std::wstring &root) {
               !q.short_term.available && !q.weekly.available,
           "missing Claude subscription telemetry is unknown");
     QuotaStore history;
-    check(parse_codex_quota(quota_line(now + 2000), q) && history.insert(q, now), "insert quota sample");
+    check(parse_codex_fixture(quota_response(now + 2000), q) && history.insert(q, now),
+          "insert quota sample");
     auto older = q;
     older.observed -= 60;
     older.short_term.remaining = 9900;
@@ -423,15 +435,24 @@ void quota_tests(const std::wstring &root) {
     auto data = join(root, L"quota-data"), logs = join(root, L"quota-logs");
     check(ensure_directory(data) && ensure_directory(logs), "quota collector fixture directories");
     auto file = join(logs, L"quota.jsonl");
-    check(atomic_write(file, quota_line(now + 1000, 10080, "4") + "\n"), "quota-only source event fixture");
+    check(
+        atomic_write(
+            file,
+            R"({"type":"event_msg","timestamp":")" + iso_now() +
+                R"(","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex","primary":{"used_percent":3,"window_minutes":300},"secondary":null}}})"
+                "\n"),
+        "conflicting session quota fixture");
+    check(parse_codex_fixture(quota_response(now + 1000, 10080, "4"), q) && save_codex_fixture(data, q),
+          "account quota fixture");
     Settings settings = default_settings();
     settings.enabled[0] = false;
     settings.roots[1] = logs;
     Collector collector(data);
     collector.configure(settings);
     auto snap = collector.scan();
-    check(snap.providers[1].total.events == 0 && snap.providers[1].quota.latest.weekly.remaining == 9600,
-          "collector keeps account quota separate from token totals");
+    check(snap.providers[1].total.events == 0 && snap.providers[1].quota.latest.weekly.remaining == 9600 &&
+              !snap.providers[1].quota.latest.short_term.available,
+          "session quota cannot overwrite the account RPC snapshot");
     Collector restart(data);
     restart.configure(settings);
     check(restart.load(), "load persisted quota history");
@@ -441,6 +462,16 @@ void quota_tests(const std::wstring &root) {
     std::string state_text;
     check(read_text(join(data, L"state.json"), state_text, 1024 * 1024), "read migration fixture");
     auto state = parse(state_text);
+    cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(state.get(), "version"), 2);
+    check(DeleteFileW(join(data, L"codex-quota.json").c_str()), "remove account fixture for migration");
+    check(atomic_write(join(data, L"state.json"), dump(state.get())), "write polluted v2 quota cache");
+    Collector v2(data);
+    v2.configure(settings);
+    check(v2.load(), "version two cache accepted for migration");
+    snap = v2.scan();
+    check(!snap.providers[1].quota.latest.observed && snap.providers[1].quota.history.empty() &&
+              v2.bytes_read() == 0,
+          "v2 mixed quotas discarded while log checkpoints retained");
     cJSON_SetNumberValue(cJSON_GetObjectItemCaseSensitive(state.get(), "version"), 1);
     cJSON_DeleteItemFromObjectCaseSensitive(state.get(), "quotas");
     check(atomic_write(join(data, L"state.json"), dump(state.get())), "write legacy cache fixture");
@@ -448,8 +479,8 @@ void quota_tests(const std::wstring &root) {
     migrated.configure(settings);
     check(migrated.load(), "version one cache accepted for migration");
     snap = migrated.scan();
-    check(snap.providers[1].quota.latest.weekly.remaining == 9600 && migrated.bytes_read() > 0,
-          "legacy checkpoints replayed for quota discovery");
+    check(!snap.providers[1].quota.latest.observed && migrated.bytes_read() == 0,
+          "legacy checkpoints retained without importing session quota");
     auto bridge_dir = join(root, L"bridge-data"), claude_settings = join(root, L"claude-test-settings.json");
     check(ensure_directory(bridge_dir), "bridge fixture folder");
     check(
@@ -549,7 +580,123 @@ void probe_tests(const std::wstring &root) {
     SetEnvironmentVariableW(L"USERPROFILE", profile.c_str());
     SetEnvironmentVariableW(L"AI_MON_TEST_PROBE", nullptr);
 }
+int fake_codex() {
+    char line[2048];
+    if (!std::fgets(line, sizeof(line), stdin) || !strstr(line, "initialize"))
+        return 2;
+    std::puts(R"({"id":1,"result":{}})");
+    std::fflush(stdout);
+    if (!std::fgets(line, sizeof(line), stdin) || !strstr(line, "initialized") ||
+        !std::fgets(line, sizeof(line), stdin) || !strstr(line, "account/rateLimits/read"))
+        return 3;
+    auto mode = env(L"AI_MON_TEST_CODEX");
+    if (mode == L"hang") {
+        Sleep(30000);
+        return 4;
+    }
+    if (mode == L"error")
+        std::puts(R"({"id":2,"error":{"code":-32000,"message":"offline"}})");
+    else if (mode == L"auth")
+        std::puts(
+            R"({"id":2,"error":{"code":-32600,"message":"codex account authentication required to read rate limits"}})");
+    else if (mode == L"invalid")
+        std::puts(R"({"id":2,"result":{"rateLimits":{}}})");
+    else if (mode == L"oversize") {
+        for (int i = 0; i < 2200; ++i)
+            std::fputs(std::string(1024, 'x').c_str(), stdout);
+    } else {
+        // Both a notification and the legacy view deliberately contain a different quota.
+        std::puts(
+            R"({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_bengalfox"}}})");
+        std::puts(
+            R"({"id":2,"result":{"accountId":"synthetic-private-account","rateLimits":{"limitId":"codex_bengalfox"},"rateLimitsByLimitId":{"codex_bengalfox":{"limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":0,"windowDurationMins":300},"secondary":{"usedPercent":17,"windowDurationMins":10080}},"codex":{"limitId":"codex","planType":"prolite","primary":{"usedPercent":22,"windowDurationMins":10080,"resetsAt":null},"secondary":null}}}})");
+    }
+    std::fflush(stdout);
+    Sleep(30000);
+    return 0;
+}
+void codex_tests(const std::wstring &root) {
+    uint64_t now = now_seconds();
+    QuotaSnapshot q;
+    for (
+        const auto *text :
+        {R"({"rateLimitsByLimitId":{"codex_bengalfox":{"primary":{"usedPercent":0,"windowDurationMins":300}}},"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":300},"secondary":null}})",
+         R"({"rateLimits":{"primary":{"usedPercent":0,"windowDurationMins":300},"secondary":null}})",
+         R"({"rateLimits":{"limitName":"GPT-5.3-Codex-Spark","primary":{"usedPercent":0,"windowDurationMins":300},"secondary":null}})",
+         R"({"rateLimits":{"limitId":"codex_bengalfox","primary":{"usedPercent":0,"windowDurationMins":300},"secondary":null}})",
+         R"({"rateLimitsByLimitId":{"codex":{"limitId":"codex_bengalfox","primary":null,"secondary":null}}})"}) {
+        check(parse_codex_fixture(text, q) && !q.short_term.available && !q.weekly.available,
+              "other bucket never becomes main quota, including unnamed legacy IDs");
+    }
+    for (
+        const auto *text :
+        {R"({})", R"({"rateLimitsByLimitId":[]})",
+         R"({"rateLimitsByLimitId":{"codex":null},"rateLimits":{"primary":null,"secondary":null}})",
+         R"({"rateLimits":{"limitId":"codex","primary":{"usedPercent":1,"windowDurationMins":300},"secondary":{"usedPercent":2,"windowDurationMins":240}}})",
+         R"({"rateLimits":{"limitId":"codex","primary":{"usedPercent":"1","windowDurationMins":300},"secondary":null}})"})
+        check(!parse_codex_fixture(text, q), "invalid full snapshot rejected without fallback");
+    check(parse_codex_fixture(quota_response(now + 60), q), "account history fixture");
+    q.scope = "account-a";
+    QuotaStore history;
+    history.insert(q, now);
+    q.short_term.remaining = 5500;
+    check(history.insert(q, now) && history.latest.short_term.remaining == 5500 &&
+              history.history.size() == 1,
+          "same-second account update replaces its history point");
+    q.scope = "account-b";
+    ++q.observed;
+    history.insert(q, now);
+    check(history.history.size() == 1 && history.latest.scope == "account-b",
+          "account change clears history");
+    q.scope = "account-a";
+    q.observed -= 2;
+    check(!history.insert(q, now) && history.latest.scope == "account-b", "older account cannot return");
+    CodexPoll poll;
+    check(poll.due(0), "Codex lookup at startup");
+    poll.completed(0);
+    check(!poll.due(119999) && poll.due(120000), "idle polling does not depend on logs");
+    poll.requested = true;
+    check(!poll.due(14999) && poll.due(15000), "manual refresh throttled separately");
+    wchar_t self[32768]{};
+    GetModuleFileNameW(nullptr, self, 32768);
+    auto data = join(root, L"codex-rpc-output");
+    SetEnvironmentVariableW(L"AI_MON_TEST_CODEX", L"success");
+    check(probe_codex(data, nullptr, self) == CodexProbe::Ready,
+          "account RPC handshake without a model turn");
+    std::string before, after;
+    check(read_text(join(data, L"codex-quota.json"), before, 8192), "read normalized Codex result");
+    auto doc = parse(before);
+    check(quota_json(doc.get(), q) && !q.short_term.available && q.weekly.remaining == 7800 &&
+              before.find("synthetic-private-account") == std::string::npos &&
+              before.find("Spark") == std::string::npos && !q.scope.empty(),
+          "main bucket selected; private account and other buckets not saved");
+    for (const auto *mode : {L"error", L"invalid", L"oversize", L"hang"}) {
+        SetEnvironmentVariableW(L"AI_MON_TEST_CODEX", mode);
+        auto started = GetTickCount64();
+        check(probe_codex(data, nullptr, self, 500) == CodexProbe::Failed &&
+                  GetTickCount64() - started < 3000,
+              "RPC failure and oversized or hung child bounded");
+        check(read_text(join(data, L"codex-quota.json"), after, 8192) && after == before,
+              "lookup failure preserves timestamp and last known value");
+    }
+    Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    Handle cancel(CreateThread(nullptr, 0, cancel_probe, stop.value, 0, nullptr));
+    auto started = GetTickCount64();
+    check(probe_codex(data, stop.value, self) == CodexProbe::Failed && GetTickCount64() - started < 3000,
+          "Codex child cancelled during shutdown");
+    WaitForSingleObject(cancel.value, INFINITE);
+    SetEnvironmentVariableW(L"AI_MON_TEST_CODEX", L"auth");
+    check(probe_codex(data, nullptr, self) == CodexProbe::AuthRequired,
+          "authentication failure reported explicitly");
+    check(read_text(join(data, L"codex-quota.json"), after, 8192), "read signed-out snapshot");
+    doc = parse(after);
+    check(quota_json(doc.get(), q) && !q.weekly.available && !q.short_term.available,
+          "sign-out clears previous account quota");
+    SetEnvironmentVariableW(L"AI_MON_TEST_CODEX", nullptr);
+}
 int wmain(int argc, wchar_t **argv) {
+    if (argc == 2 && wcscmp(argv[1], L"app-server") == 0)
+        return fake_codex();
     if (argc == 3 && wcscmp(argv[1], L"--startup-test") == 0) {
         std::wstring key = argv[2];
         if (key.find(L"Software\\AI Mon\\Tests\\") != 0)
@@ -582,6 +729,7 @@ int wmain(int argc, wchar_t **argv) {
         language_tests(argv[1]);
         quota_tests(argv[1]);
         probe_tests(argv[1]);
+        codex_tests(argv[1]);
         check(startup_command(L"C:\\Program Files\\AI Mon\\ai-mon.exe", L"C:\\Data\\") ==
                   L"\"C:\\Program Files\\AI Mon\\ai-mon.exe\" --startup --data-dir \"C:\\Data\\\\\"",
               "startup command safely quotes spaces and trailing slash");

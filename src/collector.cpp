@@ -99,11 +99,7 @@ bool Collector::read_file(const FileInfo &file, int provider, FileState &s, HAND
                 if (!s.discarding && !line.empty()) {
                     if (line.back() == '\r')
                         line.pop_back();
-                    if (provider == 1) {
-                        QuotaSnapshot quota;
-                        if (parse_codex_quota(line, quota))
-                            quotas_[1].insert(quota, now_seconds());
-                    }
+                    // Session telemetry is for token totals only. Quota comes from account RPC.
                     UsageEvent e;
                     auto result = parse_usage(provider, line, source, s.parser, e);
                     if (result == ParseResult::Event && e.time + Retention >= now_seconds() &&
@@ -232,6 +228,16 @@ Snapshot Collector::scan(HANDLE stop) {
             dirty_ = true;
         }
     }
+    if (settings_.enabled[1]) {
+        std::string text;
+        if (read_text(join(data_dir_, L"codex-quota.json"), text, 8192)) {
+            auto doc = parse(text);
+            QuotaSnapshot quota;
+            if (str(doc.get(), "source") == "codex-account" && str(doc.get(), "limit_id") == "codex" &&
+                quota_json(doc.get(), quota) && quotas_[1].insert(quota, now_seconds()))
+                dirty_ = true;
+        }
+    }
     for (int provider = 0; provider < 2; ++provider)
         if (settings_.enabled[provider])
             snapshot.providers[provider].quota = quotas_[provider];
@@ -245,7 +251,7 @@ Snapshot Collector::scan(HANDLE stop) {
 }
 bool Collector::save() {
     auto doc = json(cJSON_CreateObject());
-    put(doc.get(), "version", uint64_t(2));
+    put(doc.get(), "version", uint64_t(3));
     put(doc.get(), "limited", store_.limited);
     auto quotas = cJSON_AddArrayToObject(doc.get(), "quotas");
     for (const auto &store : quotas_) {
@@ -320,7 +326,7 @@ bool Collector::load() {
         return false;
     auto doc = parse(text);
     uint64_t version = 0;
-    if (!doc || !number(field(doc.get(), "version"), version) || (version != 1 && version != 2))
+    if (!doc || !number(field(doc.get(), "version"), version) || (version < 1 || version > 3))
         return false;
     auto roots = field(doc.get(), "roots");
     auto events = field(doc.get(), "events");
@@ -368,19 +374,17 @@ bool Collector::load() {
         s.malformed = cJSON_IsTrue(field(p, "malformed"));
         s.unsupported = cJSON_IsTrue(field(p, "unsupported"));
         s.discarding = cJSON_IsTrue(field(p, "discarding"));
-        // Preserve old token events; replay Codex files once to discover quotas.
-        if (version == 1 && s.provider == 1) {
-            s = {};
-            s.provider = 1;
-        }
         if (matching[s.provider])
             restored.emplace(filePath, std::move(s));
     }
     auto quota_array = field(doc.get(), "quotas");
-    if (version == 2 && (!cJSON_IsArray(quota_array) || cJSON_GetArraySize(quota_array) != 2))
+    if (version >= 2 && (!cJSON_IsArray(quota_array) || cJSON_GetArraySize(quota_array) != 2))
         return false;
     std::array<QuotaStore, 2> quotas;
-    for (int i = 0; version == 2 && i < 2; ++i) {
+    for (int i = 0; version >= 2 && i < 2; ++i) {
+        // Older caches mixed session/model quotas. Keep their token events and checkpoints.
+        if (i == 1 && version < 3)
+            continue;
         auto p = cJSON_GetArrayItem(quota_array, i);
         QuotaSnapshot latest;
         if (!quota_json(field(p, "latest"), latest))
@@ -404,7 +408,7 @@ bool Collector::load() {
     store.prune(now_seconds());
     store_ = std::move(store);
     files_ = std::move(restored);
-    dirty_ = version == 1;
+    dirty_ = version < 3;
     rebuilt_ = false;
     return true;
 }

@@ -1,6 +1,7 @@
 #include "collector.hpp"
 #include "localization.hpp"
 #include "claude_bridge.hpp"
+#include "codex_bridge.hpp"
 #include "mini_window.hpp"
 #include "startup.hpp"
 #include <shellapi.h>
@@ -30,7 +31,8 @@ struct App {
     Settings settings;
     Snapshot snapshot;
     ClaudeProbe claude_probe = ClaudeProbe::Waiting;
-    bool probe_enabled = true;
+    bool probe_enabled = true, codex_probe_enabled = true;
+    CodexProbe codex_probe = CodexProbe::Waiting;
     bool startup_controls = true;
     std::wstring executable;
     std::wstring data_dir;
@@ -373,11 +375,13 @@ void build_main() {
 void render() {
     Snapshot snapshot;
     ClaudeProbe probe;
+    CodexProbe codex_probe;
     bool failed;
     {
         Lock lock;
         snapshot = app.snapshot;
         probe = app.claude_probe;
+        codex_probe = app.codex_probe;
         failed = app.worker_failed;
     }
     mini.update(snapshot);
@@ -406,6 +410,17 @@ void render() {
                                                                   : nullptr;
             if (key)
                 status = tr(key);
+        }
+        if (i && row.status != Status::Disabled && codex_probe != CodexProbe::Ready) {
+            const char *key = codex_probe == CodexProbe::Missing        ? "quota.codex_missing"
+                              : codex_probe == CodexProbe::Failed       ? "quota.codex_failed"
+                              : codex_probe == CodexProbe::AuthRequired ? "quota.codex_auth"
+                              : codex_probe == CodexProbe::Unavailable  ? "quota.codex_unavailable"
+                                                                        : nullptr;
+            if (key)
+                status =
+                    std::wstring(tr(key)) +
+                    (row.quota.latest.observed && codex_probe == CodexProbe::Failed ? L" / " + status : L"");
         }
         SetWindowTextW(app.status[i], status.c_str());
         for (HWND chart : app.chart[i])
@@ -436,6 +451,7 @@ DWORD WINAPI worker_main(void *) {
         Watch watches[2];
         uint64_t last_probe = 0;
         bool requested_probe = true;
+        CodexPoll codex_poll;
         bool immediate = true;
         while (WaitForSingleObject(app.stop.value, 0) != WAIT_OBJECT_0) {
             Settings settings;
@@ -462,6 +478,12 @@ DWORD WINAPI worker_main(void *) {
                     Lock lock;
                     app.claude_probe = result;
                 }
+                if (app.codex_probe_enabled && settings.enabled[1] && codex_poll.due(GetTickCount64())) {
+                    auto result = probe_codex(app.data_dir, app.stop.value);
+                    codex_poll.completed(GetTickCount64());
+                    Lock lock;
+                    app.codex_probe = result;
+                }
                 auto snapshot = collector.scan(app.stop.value);
                 {
                     Lock lock;
@@ -470,6 +492,12 @@ DWORD WINAPI worker_main(void *) {
                 PostMessageW(app.window, UpdatedMessage, 0, 0);
             }
             DWORD delay = static_cast<DWORD>(settings.interval * 1000);
+            if (app.codex_probe_enabled && settings.enabled[1]) {
+                auto elapsed = GetTickCount64() - codex_poll.last;
+                auto interval = codex_poll.requested ? 15000ULL : 120000ULL;
+                delay =
+                    std::min<DWORD>(delay, elapsed >= interval ? 0 : static_cast<DWORD>(interval - elapsed));
+            }
             {
                 Lock lock;
                 for (const auto &row : app.snapshot.providers)
@@ -486,8 +514,10 @@ DWORD WINAPI worker_main(void *) {
                     ++count;
                 }
             DWORD result = WaitForMultipleObjects(count, handles, FALSE, delay);
-            if (result == WAIT_OBJECT_0 + 1)
+            if (result == WAIT_OBJECT_0 + 1) {
                 requested_probe = true;
+                codex_poll.requested = true;
+            }
             if (result == WAIT_OBJECT_0)
                 break;
             if (result >= WAIT_OBJECT_0 + 2 && result < WAIT_OBJECT_0 + count) {
@@ -522,7 +552,7 @@ void about(HWND owner) {
                 license = wide(std::string(text, SizeofResource(instance, r)));
         }
     }
-    std::wstring message = locale.format("about.body", {{L"version", L"0.3.4"}}) + license;
+    std::wstring message = locale.format("about.body", {{L"version", L"0.3.5"}}) + license;
     MessageBoxW(owner, message.c_str(), tr("about.title"), MB_OK | MB_ICONINFORMATION);
 }
 struct SettingsUI {
@@ -945,6 +975,7 @@ int run(HINSTANCE module) {
         return result;
     }
     std::wstring custom_data;
+    bool codex_probe_mode = false;
     bool smoke = false, bridge_mode = false, probe_mode = false, startup_mode = false, remove_startup = false;
     std::string language_override;
     for (int i = 1; argv && i < argc; ++i) {
@@ -954,6 +985,10 @@ int run(HINSTANCE module) {
             language_override = utf8(argv[++i]);
         else if (wcscmp(argv[i], L"--claude-statusline") == 0)
             bridge_mode = true;
+        else if (wcscmp(argv[i], L"--codex-probe") == 0)
+            codex_probe_mode = true;
+        else if (wcscmp(argv[i], L"--no-codex-probe") == 0)
+            app.codex_probe_enabled = false;
         else if (wcscmp(argv[i], L"--claude-probe") == 0)
             probe_mode = true;
         else if (wcscmp(argv[i], L"--no-claude-probe") == 0)
@@ -974,10 +1009,13 @@ int run(HINSTANCE module) {
         return remove_startup_for(app.executable) ? 0 : 1;
     if (bridge_mode)
         return claude_statusline(app.data_dir);
+    if (codex_probe_mode)
+        return probe_codex(app.data_dir) == CodexProbe::Ready ? 0 : 4;
     if (probe_mode)
         return probe_claude(app.data_dir) == ClaudeProbe::Ready ? 0 : 4;
     if (smoke) {
         app.probe_enabled = false;
+        app.codex_probe_enabled = false;
         app.startup_controls = false;
     }
     if (!locale.initialize(instance, app.data_dir))
