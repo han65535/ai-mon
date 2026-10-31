@@ -19,8 +19,8 @@ mkdir -p "$tmp/한글 폴더/사용량"
 [[ "$(cat "$XDG_CONFIG_HOME/ai-mon/claude-root")" == "$tmp/한글 폴더/사용량" ]]
 mkdir -p "$tmp/.codex/sessions"
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-printf '{"type":"assistant","sessionId":"test","timestamp":"%s","message":{"id":"a","usage":{"input_tokens":12,"output_tokens":3}}}\n' "$now" > "$tmp/한글 폴더/사용량/test.jsonl"
-printf '{"type":"event_msg","timestamp":"%s","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":4,"cached_input_tokens":5}}}}\n' "$now" > "$tmp/.codex/sessions/test.jsonl"
+printf '{"type":"assistant","sessionId":"test","timestamp":"%s","message":{"id":"a","model":"claude-fixture","usage":{"input_tokens":12,"output_tokens":3}}}\n' "$now" > "$tmp/한글 폴더/사용량/test.jsonl"
+printf '{"type":"session_meta","payload":{"id":"test-session","originator":"codex_vscode"}}\n{"type":"turn_context","payload":{"model":"codex-fixture"}}\n{"type":"event_msg","timestamp":"%s","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":4,"cached_input_tokens":5}}}}\n' "$now" > "$tmp/.codex/sessions/test.jsonl"
 printf '%s\n' 'PASS: Korean UTF-8 path roundtrip'
 Xvfb "$DISPLAY" -screen 0 1024x768x24 >"$tmp/xvfb.log" 2>&1 & xvfb=$!
 for i in {1..50}; do xdpyinfo >/dev/null 2>&1 && break; sleep .1; done
@@ -56,7 +56,23 @@ with open(sys.argv[1], encoding='utf-8') as f:
     q = json.load(f)['quotas']
 assert q[0]['latest']['short']['remaining'] == 6000 and q[1]['latest']['short']['remaining'] == 7500
 PYQUOTA
-printf '%s\n' 'PASS: Claude and Codex fixture logs and mock quota responses collected by UI process' 
+printf '%s\n' 'PASS: Claude and Codex fixture logs and mock quota responses collected by UI process'
+for i in {1..80}; do
+    if python3 - "$tmp/state/ai-mon/history.sqlite3" <<'PYHISTORY' 2>/dev/null
+import sqlite3, sys
+con = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True)
+rows = con.execute('SELECT provider,model,source,input,output FROM events ORDER BY provider').fetchall()
+assert rows == [(0, 'claude-fixture', '', 12, 3), (1, 'codex-fixture', 'VS Code', 20, 4)]
+PYHISTORY
+    then break; fi
+    sleep .1
+done
+python3 - "$tmp/state/ai-mon/history.sqlite3" <<'PYHISTORY'
+import sqlite3, sys
+con = sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True)
+assert con.execute('SELECT provider,model,source,input,output FROM events ORDER BY provider').fetchall() == [(0, 'claude-fixture', '', 12, 3), (1, 'codex-fixture', 'VS Code', 20, 4)]
+PYHISTORY
+printf '%s\n' 'PASS: persistent model and source history'
 item=$(cat "$tmp/item")
 printf '%s\n' "Registered: $item"
 python3 "$AIMON_ICON_CHECK" "$item"
@@ -65,6 +81,11 @@ props=$(gdbus call --session --dest "$item" --object-path /StatusNotifierItem --
 [[ "$props" == *"ai-mon-linux"* && "$props" == *"IconPixmap"* ]]
 layout=$(gdbus call --session --dest "$item" --object-path /Menu --method com.canonical.dbusmenu.GetLayout -- 0 -1 '[]')
 [[ "$layout" == *'미니 창'* && "$layout" == *'종료'* ]]
+gdbus call --session --dest "$item" --object-path /Menu --method com.canonical.dbusmenu.Event 4 clicked '<0>' 0 >/dev/null
+for i in {1..50}; do grep -q 'xdg_toplevel.*set_title.*AI Mon - 기록' "$tmp/app.log" && break; sleep .1; done
+grep -q 'xdg_toplevel.*set_title.*AI Mon - 기록' "$tmp/app.log"
+if [[ -n "${AIMON_HISTORY_SCREENSHOT:-}" ]]; then sleep 2; scrot "$AIMON_HISTORY_SCREENSHOT"; fi
+printf '%s\n' 'PASS: history window opens from tray'
 gdbus call --session --dest "$item" --object-path /Menu --method com.canonical.dbusmenu.Event 2 clicked '<0>' 0 >/dev/null
 for i in {1..50}; do grep -q 'xdg_toplevel.*set_title.*AI Mon mini' "$tmp/app.log" && break; sleep .1; done
 grep -q 'xdg_toplevel.*set_title.*AI Mon mini' "$tmp/app.log"

@@ -114,7 +114,7 @@ CodexProbe probe_codex(const std::wstring &data, HANDLE stop, const std::wstring
         return WriteFile(writer.value, request, size, &written, nullptr) && written == size;
     };
     if (!send(
-            R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_mon","title":"AI Mon","version":"0.3.5"}}})"
+            R"({"id":1,"method":"initialize","params":{"clientInfo":{"name":"ai_mon","title":"AI Mon","version":"0.4.1"}}})"
             "\n"))
         return CodexProbe::Failed;
     std::string pending;

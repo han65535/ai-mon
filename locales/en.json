@@ -95,6 +95,27 @@
     "settings.autostart": "Start automatically when I sign in to Windows",
     "settings.transparency": "Mini window transparency",
     "settings.transparency_hint": "0%: opaque · 70%: most transparent. Preview, then Save or Cancel.",
-    "settings.startup_error": "Could not change automatic startup. Check path length, user permissions, or changes made elsewhere."
+    "settings.startup_error": "Could not change automatic startup. Check path length, user permissions, or changes made elsewhere.",
+    "history.action": "History",
+    "history.title": "AI Mon · Usage history",
+    "history.weekly": "Weekly",
+    "history.monthly": "Monthly",
+    "history.week_header": "Weekly history (Monday to Sunday)",
+    "history.month_header": "Monthly history",
+    "history.error": "Could not load or save history.",
+    "history.collecting": "Collecting earlier records; totals may increase.",
+    "history.incomplete": "Some records are missing or may be inaccurate because a source changed.",
+    "history.truncated": "Only part of the history is displayed.",
+    "history.scope": "Collected on this PC · cache reads are included in input",
+    "history.total": "Total",
+    "history.overflow": "Number exceeds supported range",
+    "history.totals": "Input {input}  Output {output}  Records {count}",
+    "history.unknown_model": "Unknown model",
+    "history.unknown_source": "Unknown source",
+    "history.row": "Input {input}  Output {output}  Cache read {cached}  Records {count}",
+    "history.empty": "No records collected.",
+    "history.export": "Export CSV",
+    "history.export_unavailable": "Wait until collection completes and the complete report is available.",
+    "history.export_failed": "Could not save the CSV file."
   }
 }

@@ -19,10 +19,11 @@ printf 'AI Mon is based in part on the work of the FLTK project (https://www.flt
 install -m 644 "$root/third_party/cjson/LICENSE" "$tmp/debian/ai-mon-linux/usr/share/doc/ai-mon-linux/cjson-LICENSE"
 deps=$(cd "$tmp" && dpkg-shlibdeps -O -e debian/ai-mon-linux/usr/bin/ai-mon | sed 's/^shlibs:Depends=//')
 [[ -n "$deps" ]] || { echo 'Dependency discovery failed' >&2; exit 1; }
+[[ "$deps" == *"libsqlite3-0"* ]] || { echo 'SQLite dependency missing' >&2; exit 1; }
 size=$(du -sk "$tmp/debian/ai-mon-linux/usr" | cut -f1)
 cat > "$tmp/debian/ai-mon-linux/DEBIAN/control" <<CONTROL
 Package: ai-mon-linux
-Version: 0.4.0~beta1
+Version: 0.4.1~beta1
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -34,4 +35,4 @@ Description: Local Claude and Codex usage monitor
  A native Linux beta for local token usage and reported account limits.
 CONTROL
 mkdir -p "$root/out/linux-release"
-dpkg-deb --build --root-owner-group "$tmp/debian/ai-mon-linux" "$root/out/linux-release/ai-mon-linux_0.4.0~beta1_amd64.deb"
+dpkg-deb --build --root-owner-group "$tmp/debian/ai-mon-linux" "$root/out/linux-release/ai-mon-linux_0.4.1~beta1_amd64.deb"

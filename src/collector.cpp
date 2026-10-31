@@ -265,7 +265,7 @@ Snapshot Collector::scan(HANDLE stop) {
             }
             auto &state = files_[file.path];
             state.provider = provider;
-            bool changed = !state.identity || state.modified != file.modified || state.size != file.size ||
+            bool changed = !state.identity || (file.identity && state.identity != file.identity) || state.modified != file.modified || state.size != file.size ||
                            state.offset < file.size;
             if (changed) {
                 if (budget) {

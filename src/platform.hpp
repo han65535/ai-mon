@@ -56,7 +56,7 @@ std::string hex(uint64_t value);
 std::wstring grouped(uint64_t value);
 struct FileInfo {
     std::wstring path;
-    uint64_t size = 0, modified = 0;
+    uint64_t size = 0, modified = 0, identity = 0;
 };
 std::vector<FileInfo> list_logs(const std::wstring &root, bool &error, HANDLE stop = nullptr);
 #ifdef _WIN32

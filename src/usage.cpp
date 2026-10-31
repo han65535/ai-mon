@@ -42,6 +42,8 @@ ParseResult parse_usage(int provider, const std::string &line, const std::string
         if (type != "assistant")
             return ParseResult::Ignore;
         auto msg = field(p, "message");
+        e.model = str(msg, "model");
+        if (e.model.size() > 256) e.model.clear();
         auto usage = field(msg, "usage");
         if (!usage || cJSON_IsNull(usage))
             return ParseResult::Ignore;
@@ -67,11 +69,23 @@ ParseResult parse_usage(int provider, const std::string &line, const std::string
         if (!id.empty() && id.size() <= 512) {
             if (!state.session.empty() && state.session != id) {
                 state.previous = {};
+                state.model.clear();
+                state.previous_model.clear();
+                state.source.clear();
                 state.has_previous = false;
                 state.epoch = 0;
             }
             state.session = id;
         }
+        auto origin = str(payload, "originator"), source = str(payload, "source");
+        if (origin == "codex_vscode" || source == "vscode") state.source = "VS Code";
+        else if (source == "cli" || origin == "codex-tui" || origin == "codex_cli_rs") state.source = "CLI";
+        else state.source.clear();
+        return ParseResult::Ignore;
+    }
+    if (type == "turn_context") {
+        auto model = str(payload, "model");
+        state.model = model.size() <= 256 ? model : "";
         return ParseResult::Ignore;
     }
     if (type != "event_msg" || str(payload, "type") != "token_count")
@@ -103,7 +117,11 @@ ParseResult parse_usage(int provider, const std::string &line, const std::string
                        ? last
                        : total;
     }
+    // A cumulative delta spanning a model change cannot be attributed safely.
+    e.model = state.has_previous && !reset && state.previous_model != state.model ? "" : state.model;
+    e.source = state.source;
     state.previous = total;
+    state.previous_model = state.model;
     state.has_previous = true;
     e.key = "x:" + piece(state.session.empty() ? source : state.session) + std::to_string(state.epoch) + ":" +
             std::to_string(total.input) + ":" + std::to_string(total.output) + ":" +

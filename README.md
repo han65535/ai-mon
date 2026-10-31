@@ -73,6 +73,8 @@ Scripts do not download tools or change system execution policies. Installer int
 
 Release builds validate embedded translations, executable size, x64 architecture, ASLR/DEP/CFG flags, and Windows system DLL dependencies. Generated size/hash reports live under `out/Release` and `out/Installer`.
 
+Weekly/monthly model usage history is included in the 0.4.1 development build; see [Windows history notes](docs/WINDOWS_HISTORY.md) for behavior and validation. The public download above remains version 0.3.5.
+
 ## Documentation
 
 - [Remaining allowance, tray graphs, and Claude setup (English)](docs/QUOTAS.md)

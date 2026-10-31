@@ -4,6 +4,7 @@
 #include "codex_bridge.hpp"
 #include "mini_window.hpp"
 #include "startup.hpp"
+#include "history_window.hpp"
 #include <shellapi.h>
 #include <commctrl.h>
 #include <algorithm>
@@ -17,7 +18,7 @@ constexpr wchar_t ChartClass[] = L"AI.Mon.QuotaChart.1";
 constexpr wchar_t SettingsClass[] = L"AI.Mon.Settings.1";
 std::wstring main_class_name = MainClass;
 constexpr UINT TrayMessage = WM_APP + 1, UpdatedMessage = WM_APP + 2;
-constexpr int Open = 100, Refresh = 101, Configure = 102, About = 103, Exit = 104, Mini = 105;
+constexpr int Open = 100, Refresh = 101, Configure = 102, About = 103, Exit = 104, Mini = 105, ShowHistory = 106;
 HINSTANCE instance = nullptr;
 Localizer locale;
 MiniWindow mini;
@@ -30,6 +31,8 @@ struct App {
     CRITICAL_SECTION lock{};
     Settings settings;
     Snapshot snapshot;
+    HistoryView history_view;
+    HistoryWindow history_window;
     ClaudeProbe claude_probe = ClaudeProbe::Waiting;
     bool probe_enabled = true, codex_probe_enabled = true;
     CodexProbe codex_probe = CodexProbe::Waiting;
@@ -367,10 +370,11 @@ void build_main() {
         app.status[i] = add(L"STATIC", tr("status.collecting"), SS_ENDELLIPSIS, 0, 42, y + 195, 490, 18);
     }
     app.note = add(L"STATIC", tr("quota.note"), 0, 0, 24, 550, 528, 42);
-    add(L"BUTTON", tr("action.refresh"), WS_TABSTOP | BS_PUSHBUTTON, Refresh, 24, 606, 132, 34);
-    add(L"BUTTON", tr("action.settings"), WS_TABSTOP | BS_PUSHBUTTON, Configure, 166, 606, 96, 34);
-    add(L"BUTTON", tr("mini.action"), WS_TABSTOP | BS_PUSHBUTTON, Mini, 274, 606, 170, 34);
-    add(L"BUTTON", tr("action.about"), WS_TABSTOP | BS_PUSHBUTTON, About, 456, 606, 96, 34);
+    add(L"BUTTON", tr("action.refresh"), WS_TABSTOP | BS_PUSHBUTTON, Refresh, 24, 606, 100, 34);
+    add(L"BUTTON", tr("action.settings"), WS_TABSTOP | BS_PUSHBUTTON, Configure, 132, 606, 90, 34);
+    add(L"BUTTON", tr("mini.action"), WS_TABSTOP | BS_PUSHBUTTON, Mini, 230, 606, 120, 34);
+    add(L"BUTTON", tr("history.action"), WS_TABSTOP | BS_PUSHBUTTON, ShowHistory, 358, 606, 104, 34);
+    add(L"BUTTON", tr("action.about"), WS_TABSTOP | BS_PUSHBUTTON, About, 470, 606, 82, 34);
 }
 void render() {
     Snapshot snapshot;
@@ -385,6 +389,10 @@ void render() {
         failed = app.worker_failed;
     }
     mini.update(snapshot);
+    if (app.history_window.visible()) {
+        HistoryView view; { Lock lock; view = app.history_view; }
+        app.history_window.update(view);
+    }
     for (int i = 0; i < 2; ++i) {
         const auto &row = snapshot.providers[i];
         auto local = locale.format("quota.local_tokens", {{L"input", grouped(row.total.tokens.input)},
@@ -441,6 +449,7 @@ void render() {
 DWORD WINAPI worker_main(void *) {
     try {
         Collector collector(app.data_dir);
+        History history(app.data_dir);
         Settings initial;
         {
             Lock lock;
@@ -469,6 +478,13 @@ DWORD WINAPI worker_main(void *) {
                     watches[i].start(settings.roots[i]);
             }
             if (immediate) {
+                HistoryView view;
+                bool valid = history.scan(settings, app.stop.value);
+                if (valid) { valid = history.report(false, view.rows[0]); view.truncated[0] = history.truncated(); }
+                if (valid) { valid = history.report(true, view.rows[1]); view.truncated[1] = history.truncated(); }
+                view.failed = !valid; view.pending = history.pending(); view.incomplete = history.incomplete();
+                { Lock lock; app.history_view = std::move(view); }
+                PostMessageW(app.window, UpdatedMessage, 0, 0);
                 auto tick = GetTickCount64();
                 if (app.probe_enabled && settings.enabled[0] &&
                     (!last_probe || tick - last_probe >= (requested_probe ? 15000ULL : 120000ULL))) {
@@ -503,6 +519,7 @@ DWORD WINAPI worker_main(void *) {
                 for (const auto &row : app.snapshot.providers)
                     if (row.status == Status::Collecting)
                         delay = 100;
+                if (app.history_view.pending) delay = 100;
             }
             HANDLE handles[4] = {app.stop.value, app.wake.value, nullptr, nullptr};
             int index[4] = {-1, -1, -1, -1};
@@ -552,7 +569,7 @@ void about(HWND owner) {
                 license = wide(std::string(text, SizeofResource(instance, r)));
         }
     }
-    std::wstring message = locale.format("about.body", {{L"version", L"0.3.5"}}) + license;
+    std::wstring message = locale.format("about.body", {{L"version", L"0.4.1"}}) + license;
     MessageBoxW(owner, message.c_str(), tr("about.title"), MB_OK | MB_ICONINFORMATION);
 }
 struct SettingsUI {
@@ -853,6 +870,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             HMENU menu = CreatePopupMenu();
             AppendMenuW(menu, MF_STRING, Open, tr("action.open"));
             AppendMenuW(menu, MF_STRING | (mini.visible() ? MF_CHECKED : 0), Mini, tr("mini.action"));
+            AppendMenuW(menu, MF_STRING, ShowHistory, tr("history.action"));
             AppendMenuW(menu, MF_STRING, Refresh, tr("action.refresh"));
             AppendMenuW(menu, MF_STRING, Configure, tr("action.settings"));
             AppendMenuW(menu, MF_STRING, About, tr("action.about"));
@@ -876,6 +894,12 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
         case Mini:
             mini.toggle();
             break;
+        case ShowHistory: {
+            HistoryView view; { Lock lock; view = app.history_view; }
+            app.history_window.update(view);
+            app.history_window.show();
+            break;
+        }
         case Refresh:
             SetEvent(app.wake.value);
             break;
@@ -906,6 +930,7 @@ LRESULT CALLBACK main_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
             DestroyWindow(window);
         return 0;
     case WM_DESTROY:
+        app.history_window.shutdown();
         mini.shutdown();
         notify_icon(NIM_DELETE);
         KillTimer(window, 1);
@@ -1093,7 +1118,7 @@ int run(HINSTANCE module) {
                                   nullptr, instance, nullptr);
     if (!window)
         return 1;
-    if (!mini.initialize(instance, window, app.data_dir, locale)) {
+    if (!app.history_window.initialize(instance, window, locale) || !mini.initialize(instance, window, app.data_dir, locale)) {
         DestroyWindow(window);
         return 1;
     }
@@ -1113,8 +1138,11 @@ int run(HINSTANCE module) {
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (smoke && msg.message == WM_TIMER && msg.wParam == 2) {
-            bool valid = app.controls.size() == 17 && IsWindow(app.chart[0][0]) &&
+            bool valid = app.controls.size() == 18 && IsWindow(app.chart[0][0]) &&
                          text_of(app.status[0]) == tr("status.disabled");
+            SendMessageW(window, WM_COMMAND, ShowHistory, 0);
+            valid = valid && app.history_window.visible();
+            app.history_window.shutdown();
             const std::string initial_language = app.settings.language;
             for (const std::string &language : {std::string("en"), std::string("ko"), initial_language}) {
                 // Restore the initial preference before the last dialog, including
@@ -1151,6 +1179,8 @@ int run(HINSTANCE module) {
             DestroyWindow(window);
             continue;
         }
+        if (app.history_window.handle_message(msg))
+            continue;
         if (app.settings_window && IsDialogMessageW(app.settings_window, &msg))
             continue;
         if (IsWindowVisible(window) && IsDialogMessageW(window, &msg))

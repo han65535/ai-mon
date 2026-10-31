@@ -24,7 +24,10 @@ std::wstring join(const std::wstring &a, const std::wstring &b) { return a.empty
 std::wstring canonical(const std::wstring &p) {
     if (p.empty()) return {};
     std::error_code ec; auto path = std::filesystem::absolute(std::filesystem::u8path(utf8(p)), ec);
-    return ec ? p : wide(path.lexically_normal().u8string());
+    if (ec) return p;
+    auto value = path.lexically_normal().u8string();
+    while (value.size() > 1 && value.back() == '/') value.pop_back();
+    return wide(value);
 }
 bool directory(const std::wstring &p) {
     struct stat s{};
@@ -81,7 +84,7 @@ std::vector<FileInfo> list_logs(const std::wstring &root, bool &error, HANDLE st
         if(std::filesystem::is_symlink(status)) it.disable_recursion_pending();
         else if(std::filesystem::is_regular_file(status) && p.extension()==".jsonl") {
             struct stat st{}; if(stat(p.c_str(),&st)!=0) error=true;
-            else {out.push_back({wide(p.u8string()), static_cast<uint64_t>(st.st_size), static_cast<uint64_t>(st.st_mtim.tv_sec)*1000000000ULL+static_cast<uint64_t>(st.st_mtim.tv_nsec)}); if(out.size()>=20000) {error=true; break;}}
+            else { uint64_t id = static_cast<uint64_t>(st.st_ino) ^ (static_cast<uint64_t>(st.st_dev) << 17); if (!id) id = 1; out.push_back({wide(p.u8string()), static_cast<uint64_t>(st.st_size), static_cast<uint64_t>(st.st_mtim.tv_sec)*1000000000ULL+static_cast<uint64_t>(st.st_mtim.tv_nsec), id}); if(out.size()>=20000) {error=true; break;}}
         }
         it.increment(ec); if(ec) {error=true; break;}
     }

@@ -17,11 +17,13 @@ struct Tokens {
 struct UsageEvent {
     int provider = 0;
     std::string key;
+    std::string model, source;
     uint64_t time = 0, updated = 0;
     Tokens tokens;
 };
 struct ParseState {
     std::string session;
+    std::string model, previous_model, source;
     Tokens previous;
     bool has_previous = false;
     uint64_t epoch = 0;

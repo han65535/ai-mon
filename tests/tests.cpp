@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <limits>
 
+void history_tests(const std::wstring &root);
+void history_ui_tests(const std::wstring &root);
+
 using namespace aimon;
 namespace {
 int checks = 0;
@@ -717,6 +720,10 @@ int wmain(int argc, wchar_t **argv) {
         std::printf("Startup registry test: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
+    if (argc == 3 && wcscmp(argv[1], L"--history-ui-smoke") == 0) {
+        try { history_ui_tests(argv[2]); std::printf("History UI PASS\n"); return 0; }
+        catch (const std::exception &e) { std::fprintf(stderr, "History UI FAIL: %s\n", e.what()); return 1; }
+    }
     if (argc > 2 && wcscmp(argv[1], L"-p") == 0)
         return fake_claude();
     if (argc != 2) {
@@ -726,6 +733,7 @@ int wmain(int argc, wchar_t **argv) {
     try {
         parser_tests();
         collector_tests(argv[1]);
+        history_tests(argv[1]);
         language_tests(argv[1]);
         quota_tests(argv[1]);
         probe_tests(argv[1]);
