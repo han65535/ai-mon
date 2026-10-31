@@ -1,6 +1,6 @@
 # AI Mon
 
-[English](README.md) · [언어팩 작성 안내](docs/LOCALIZATION.md)
+[English](README.md) · [언어팩 작성 안내](docs/LOCALIZATION.md) · [Linux 베타](README-LINUX.ko.md)
 
 Claude Code와 Codex의 **계정 잔여 한도와 오늘 로컬 토큰 사용량**을 표시하는 Windows 트레이 앱입니다.
 C++17과 Win32로 만들며, 압축 전 실행 파일 1,000,000바이트 이하를 배포 조건으로 검사합니다.

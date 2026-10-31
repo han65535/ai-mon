@@ -1,13 +1,20 @@
 #pragma once
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <atomic>
+using HANDLE = const std::atomic_bool *;
+using HINSTANCE = void *;
+#endif
 #include <string>
 #include <vector>
 #include <cstdint>
 
 namespace aimon {
+#ifdef _WIN32
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
     Handle() = default;
@@ -31,6 +38,7 @@ struct Handle {
         value = h;
     }
 };
+#endif
 std::wstring wide(const std::string &s);
 std::string utf8(const std::wstring &s);
 std::wstring env(const wchar_t *name);
@@ -51,6 +59,7 @@ struct FileInfo {
     uint64_t size = 0, modified = 0;
 };
 std::vector<FileInfo> list_logs(const std::wstring &root, bool &error, HANDLE stop = nullptr);
+#ifdef _WIN32
 struct Watch {
     Handle folder, event;
     OVERLAPPED overlapped{};
@@ -61,4 +70,5 @@ struct Watch {
     bool arm();
     void close();
 };
+#endif
 } // namespace aimon

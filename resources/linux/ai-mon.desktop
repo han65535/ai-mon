@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=AI Mon
+Comment=Monitor Claude and Codex usage
+Comment[ko]=Claude와 Codex 사용량 확인
+Exec=ai-mon
+Icon=ai-mon
+Categories=Utility;Monitor;
+Terminal=false
+StartupNotify=true

@@ -1,12 +1,40 @@
 #include "collector.hpp"
 #include <algorithm>
 #include <set>
+#ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace aimon {
+static bool stopped(HANDLE stop) {
+#ifdef _WIN32
+    return stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0;
+#else
+    return stop && stop->load();
+#endif
+}
+static bool same_path(const std::wstring &a, const std::wstring &b) {
+#ifdef _WIN32
+    return _wcsicmp(a.c_str(), b.c_str()) == 0;
+#else
+    return a == b;
+#endif
+}
+static bool path_missing(const std::wstring &p) {
+#ifdef _WIN32
+    return GetFileAttributesW(p.c_str()) == INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st{}; return stat(utf8(p).c_str(), &st) != 0 && (errno == ENOENT || errno == ENOTDIR);
+#endif
+}
+
 Collector::Collector(std::wstring data_dir) : settings_(default_settings()), data_dir_(std::move(data_dir)) {}
 void Collector::configure(const Settings &s) {
     for (int i = 0; i < 2; ++i)
-        if (_wcsicmp(s.roots[i].c_str(), settings_.roots[i].c_str()) != 0) {
+        if (!same_path(s.roots[i], settings_.roots[i])) {
             for (auto it = store_.events.begin(); it != store_.events.end();) {
                 if (it->second.provider == i)
                     it = store_.events.erase(it);
@@ -25,6 +53,7 @@ void Collector::configure(const Settings &s) {
         }
     settings_ = s;
 }
+#ifdef _WIN32
 static uint64_t file_identity(const BY_HANDLE_FILE_INFORMATION &info) {
     return (uint64_t(info.nFileIndexHigh) << 32 | info.nFileIndexLow) ^
            (uint64_t(info.dwVolumeSerialNumber) << 17);
@@ -79,7 +108,7 @@ bool Collector::read_file(const FileInfo &file, int provider, FileState &s, HAND
     std::string source =
         hex(hash_bytes(reinterpret_cast<const char *>(file.path.data()), file.path.size() * sizeof(wchar_t)));
     while (position_now < size && budget && file_budget) {
-        if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) {
+        if (stopped(stop)) {
             pending = true;
             break;
         }
@@ -136,6 +165,63 @@ bool Collector::read_file(const FileInfo &file, int provider, FileState &s, HAND
         pending = true;
     return true;
 }
+#else
+bool Collector::read_file(const FileInfo &file, int provider, FileState &s, HANDLE stop, bool &pending, size_t &budget) {
+    int fd = open(utf8(file.path).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    struct Guard { int fd; ~Guard() { close(fd); } } guard{fd};
+    struct stat info{}; if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) return false;
+    uint64_t size = static_cast<uint64_t>(info.st_size);
+    uint64_t identity = static_cast<uint64_t>(info.st_ino) ^ (static_cast<uint64_t>(info.st_dev) << 17);
+    if (!identity) identity = 1;
+    uint64_t modified = static_cast<uint64_t>(info.st_mtim.tv_sec) * 1000000000ULL + static_cast<uint64_t>(info.st_mtim.tv_nsec);
+    bool reset = s.identity != identity || size < s.offset || (modified != s.modified && size == s.size && s.offset == size);
+    char prefix[256]{};
+    if (s.prefix_length && !reset) {
+        ssize_t got = pread(fd, prefix, s.prefix_length, 0);
+        if (got < 0) return false;
+        if (static_cast<uint64_t>(got) != s.prefix_length || hash_bytes(prefix, got) != s.prefix) reset = true;
+    }
+    if (reset) { s = {}; s.provider = provider; dirty_ = true; }
+    s.identity = identity;
+    if (!s.prefix_length && size) {
+        ssize_t got = pread(fd, prefix, std::min<uint64_t>(size, sizeof(prefix)), 0);
+        if (got < 0) return false;
+        s.prefix_length = static_cast<uint64_t>(got); s.prefix = hash_bytes(prefix, static_cast<size_t>(got));
+    }
+    std::string line, path = utf8(file.path); char buffer[65536]; uint64_t position = s.offset; size_t file_budget = 8 * 1024 * 1024;
+    std::string source = hex(hash_bytes(path.data(), path.size()));
+    while (position < size && budget && file_budget) {
+        if (stopped(stop)) { pending = true; break; }
+        size_t count = static_cast<size_t>(std::min<uint64_t>(sizeof(buffer), std::min<uint64_t>(size - position, std::min(budget, file_budget))));
+        ssize_t got = pread(fd, buffer, count, static_cast<off_t>(position));
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return false;
+        if (!got) break;
+        bytes_read_ += got; budget -= got; file_budget -= got;
+        for (ssize_t i = 0; i < got; ++i) {
+            ++position; char c = buffer[i];
+            if (c == '\n') {
+                if (!s.discarding && !line.empty()) {
+                    if (line.back() == '\r') line.pop_back();
+                    UsageEvent e; auto result = parse_usage(provider, line, source, s.parser, e);
+                    if (result == ParseResult::Event && e.time + Retention >= now_seconds() && e.time <= now_seconds() + 86400) store_.upsert(std::move(e));
+                    else if (result == ParseResult::Invalid) s.malformed = true;
+                    else if (result == ParseResult::Unsupported) s.unsupported = true;
+                }
+                line.clear(); s.discarding = false; s.offset = position; dirty_ = true;
+            } else if (!s.discarding) {
+                if (line.size() < MaxLine) line.push_back(c);
+                else { line.clear(); s.discarding = true; s.malformed = true; }
+            }
+            if (s.discarding) { s.offset = position; dirty_ = true; }
+        }
+    }
+    s.modified = modified; s.size = size;
+    if (position < size) pending = true;
+    return true;
+}
+#endif
 Snapshot Collector::scan(HANDLE stop) {
     Snapshot snapshot;
     size_t before = store_.events.size();
@@ -150,21 +236,25 @@ Snapshot Collector::scan(HANDLE stop) {
             continue;
         }
         if (!directory(settings_.roots[provider])) {
+#ifdef _WIN32
             DWORD error = GetLastError();
             row.status = (error == ERROR_ACCESS_DENIED ? Status::ReadError : Status::Missing);
+#else
+            row.status = errno == EACCES ? Status::ReadError : Status::Missing;
+#endif
             row.total = store_.today(provider, now_seconds());
             continue;
         }
         bool error = false, pending = false, malformed = false, unsupported = false;
         auto logs = list_logs(settings_.roots[provider], error, stop);
         row.files = logs.size();
-        if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)
+        if (stopped(stop))
             pending = true;
         std::set<std::wstring> present;
         size_t budget = 32 * 1024 * 1024;
         for (const auto &file : logs) {
             present.insert(file.path);
-            if (stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) {
+            if (stopped(stop)) {
                 pending = true;
                 break;
             }
@@ -219,10 +309,8 @@ Snapshot Collector::scan(HANDLE stop) {
             QuotaSnapshot quota;
             if (quota_json(doc.get(), quota) && quotas_[0].insert(quota, now_seconds()))
                 dirty_ = true;
-        } else if (GetFileAttributesW(join(data_dir_, L"claude-quota.json").c_str()) ==
-                       INVALID_FILE_ATTRIBUTES &&
-                   GetFileAttributesW(join(data_dir_, L"claude-statusline-backup.json").c_str()) ==
-                       INVALID_FILE_ATTRIBUTES &&
+        } else if (path_missing(join(data_dir_, L"claude-quota.json")) &&
+                   path_missing(join(data_dir_, L"claude-statusline-backup.json")) &&
                    quotas_[0].latest.observed) {
             quotas_[0] = {};
             dirty_ = true;
@@ -241,7 +329,7 @@ Snapshot Collector::scan(HANDLE stop) {
     for (int provider = 0; provider < 2; ++provider)
         if (settings_.enabled[provider])
             snapshot.providers[provider].quota = quotas_[provider];
-    if (dirty_ && !(stop && WaitForSingleObject(stop, 0) == WAIT_OBJECT_0)) {
+    if (dirty_ && !(stopped(stop))) {
         cache_error_ = !save();
     }
     snapshot.cache_error = cache_error_;
@@ -318,7 +406,7 @@ static bool unhex(const cJSON *p, const char *key, uint64_t &out) {
 }
 bool Collector::load() {
     std::wstring path = join(data_dir_, L"state.json");
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+    if (path_missing(path))
         return true;
     rebuilt_ = true;
     std::string text;
@@ -338,7 +426,7 @@ bool Collector::load() {
     bool matching[2];
     for (int i = 0; i < 2; ++i)
         matching[i] =
-            _wcsicmp(wide(str(cJSON_GetArrayItem(roots, i))).c_str(), settings_.roots[i].c_str()) == 0;
+            same_path(wide(str(cJSON_GetArrayItem(roots, i))), settings_.roots[i]);
     EventStore store;
     std::map<std::wstring, FileState> restored;
     const cJSON *p = nullptr;

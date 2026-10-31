@@ -163,7 +163,11 @@ Totals EventStore::today(int provider, uint64_t now) const {
 }
 Settings default_settings() {
     Settings s;
+    #ifdef _WIN32
     auto home = env(L"USERPROFILE");
+#else
+    auto home = env(L"HOME");
+#endif
     auto claude = env(L"CLAUDE_CONFIG_DIR");
     auto codex = env(L"CODEX_HOME");
     s.roots[0] = canonical(join(claude.empty() ? join(home, L".claude") : claude, L"projects"));
